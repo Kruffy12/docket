@@ -1,0 +1,333 @@
+{
+  "noun": "job",
+  "label": "Job",
+  "plural": "jobs",
+  "aliases": [
+    "j",
+    "jobs",
+    "ticket"
+  ],
+  "table": "jobs",
+  "idColumn": "id",
+  "defaultField": "status",
+  "fields": [
+    {
+      "name": "status",
+      "label": "Status",
+      "type": "enum",
+      "aliases": [
+        "st"
+      ],
+      "values": [
+        {
+          "value": "received",
+          "label": "Received",
+          "aliases": [
+            "rec"
+          ],
+          "color": "slate"
+        },
+        {
+          "value": "fixing",
+          "label": "Fixing",
+          "aliases": [
+            "fix"
+          ],
+          "color": "amber"
+        },
+        {
+          "value": "testing",
+          "label": "Testing",
+          "aliases": [
+            "test"
+          ],
+          "color": "blue"
+        },
+        {
+          "value": "ready",
+          "label": "Ready",
+          "aliases": [
+            "rdy"
+          ],
+          "color": "teal"
+        },
+        {
+          "value": "resolved",
+          "label": "Resolved",
+          "aliases": [
+            "r"
+          ],
+          "color": "green"
+        },
+        {
+          "value": "unsuccessful",
+          "label": "Unsuccessful",
+          "aliases": [
+            "fail"
+          ],
+          "color": "red"
+        },
+        {
+          "value": "abandoned",
+          "label": "Abandoned",
+          "aliases": [
+            "abn"
+          ],
+          "color": "grey"
+        }
+      ],
+      "effects": [
+        {
+          "onValues": [
+            "resolved",
+            "ready"
+          ],
+          "set": "dateCompleted",
+          "to": "$today",
+          "onlyIfEmpty": true
+        }
+      ],
+      "notices": [
+        {
+          "onValues": [
+            "received",
+            "fixing",
+            "testing",
+            "resolved",
+            "unsuccessful"
+          ],
+          "text": "Staff get a \"Job status updated\" push"
+        },
+        {
+          "onValues": [
+            "ready"
+          ],
+          "text": "Staff get the \"Device ready for pickup\" push"
+        },
+        {
+          "onValues": [
+            "abandoned"
+          ],
+          "text": "Staff get the \"Abandoned device\" push"
+        }
+      ]
+    },
+    {
+      "name": "payment",
+      "label": "Payment",
+      "type": "enum",
+      "aliases": [
+        "pay"
+      ],
+      "values": [
+        {
+          "value": "unpaid",
+          "label": "Unpaid",
+          "color": "red"
+        },
+        {
+          "value": "pending",
+          "label": "Pending",
+          "aliases": [
+            "pend"
+          ],
+          "color": "amber"
+        },
+        {
+          "value": "partial",
+          "label": "Partial",
+          "aliases": [
+            "part"
+          ],
+          "color": "amber"
+        },
+        {
+          "value": "paid-cash",
+          "label": "Paid (cash)",
+          "aliases": [
+            "cash"
+          ],
+          "color": "green"
+        },
+        {
+          "value": "paid-card",
+          "label": "Paid (card)",
+          "aliases": [
+            "card"
+          ],
+          "color": "green"
+        },
+        {
+          "value": "paid",
+          "label": "Paid",
+          "color": "green"
+        },
+        {
+          "value": "settled",
+          "label": "Settled",
+          "color": "green"
+        }
+      ]
+    },
+    {
+      "name": "priority",
+      "label": "Priority",
+      "type": "enum",
+      "aliases": [
+        "prio"
+      ],
+      "values": [
+        {
+          "value": "low",
+          "label": "Low",
+          "color": "slate"
+        },
+        {
+          "value": "high",
+          "label": "High",
+          "color": "red"
+        }
+      ]
+    },
+    {
+      "name": "notes",
+      "label": "Notes",
+      "type": "text",
+      "mode": "append",
+      "aliases": [
+        "note"
+      ]
+    },
+    {
+      "name": "estimatedCompletion",
+      "label": "Estimated completion",
+      "type": "date",
+      "aliases": [
+        "eta",
+        "due"
+      ]
+    },
+    {
+      "name": "customerName",
+      "label": "Customer",
+      "type": "text",
+      "editable": false
+    },
+    {
+      "name": "device",
+      "label": "Device",
+      "type": "text",
+      "editable": false
+    },
+    {
+      "name": "jobType",
+      "label": "Job type",
+      "type": "text",
+      "editable": false
+    },
+    {
+      "name": "technician",
+      "label": "Technician",
+      "type": "text",
+      "editable": false,
+      "hint": "It changes by claiming: use claim or unclaim"
+    },
+    {
+      "name": "claimedBy",
+      "label": "Claimed by",
+      "type": "user",
+      "editable": false
+    },
+    {
+      "name": "dateCompleted",
+      "label": "Completed",
+      "type": "date",
+      "editable": false
+    },
+    {
+      "name": "calledStatus",
+      "label": "Customer called",
+      "type": "enum",
+      "editable": false,
+      "values": [
+        {
+          "value": "not_called",
+          "label": "Not called"
+        },
+        {
+          "value": "called",
+          "label": "Called"
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "name": "claim",
+      "label": "Claim",
+      "effects": [
+        {
+          "set": "claimedBy",
+          "to": "$me"
+        },
+        {
+          "when": {
+            "field": "status",
+            "in": [
+              "received"
+            ]
+          },
+          "set": "status",
+          "to": "fixing"
+        }
+      ]
+    },
+    {
+      "name": "unclaim",
+      "label": "Unclaim",
+      "effects": [
+        {
+          "set": "claimedBy",
+          "to": "$clear"
+        }
+      ]
+    },
+    {
+      "name": "called",
+      "label": "Mark customer called",
+      "requires": {
+        "field": "status",
+        "in": [
+          "ready"
+        ]
+      },
+      "effects": [
+        {
+          "set": "calledStatus",
+          "to": "called"
+        }
+      ]
+    }
+  ],
+  "preview": [
+    "customerName",
+    "device",
+    "claimedBy",
+    "status",
+    "payment",
+    "priority",
+    "estimatedCompletion"
+  ],
+  "create": {
+    "args": [
+      "device",
+      "customerName",
+      "jobType"
+    ]
+  },
+  "rules": {
+    "confirm": "always",
+    "allowCreate": true,
+    "allowDelete": true
+  }
+}
