@@ -40,9 +40,9 @@ Installers are on the [Releases](https://github.com/Kruffy12/docket/releases) pa
 `Docket_<version>_x64-setup.exe` (or the `.msi`).
 
 To publish a release, bump the version in `src-tauri/tauri.conf.json`, `package.json` and
-`src-tauri/Cargo.toml`, then run Actions → Release → Run workflow on that branch (or push a
-matching `v…` tag). GitHub Actions builds the Windows installers, tags the commit and attaches
-them to the release.
+`src-tauri/Cargo.toml` and get it onto `main` (merge or push). GitHub Actions builds the Windows
+installers, tags the commit `v<version>` and attaches them to the release. Pushes to `main` that
+keep an already-released version don't build. Actions → Release → Run workflow rebuilds by hand.
 
 ## Build an installer
 
