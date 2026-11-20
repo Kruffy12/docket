@@ -24,6 +24,8 @@ export interface CompleteOptions extends ParseOptions {
   recentIds?: number[];
   /** Per recipe (e.g. job numbers vs item SKUs); takes over from recentIds when given. */
   recordIds?: (recipe: string) => RecordId[];
+  /** Per recipe: record names that can stand in for an ID (e.g. item names). */
+  recordNames?: (recipe: string) => string[];
   limit?: number;
 }
 
@@ -46,11 +48,18 @@ export function complete(input: string, recipes: CompiledRecipe[], opts: Complet
     const recipe = recipes.find((r) => r.noun === next.recipe);
     const ids = opts.recordIds ? opts.recordIds(next.recipe) : (opts.recentIds ?? []);
     if (recipe?.idType === "text") {
+      // Names first (what people remember), then SKUs. Names with spaces go in quotes.
+      const quote = (k: string) => (/[\s,]/.test(k) ? `"${k}"` : k);
+      const names = (opts.recordNames?.(next.recipe) ?? []).filter((n) => n.toLowerCase().startsWith(partial));
+      for (const n of names) {
+        if (items.length >= limit) break;
+        items.push({ text: quote(n), label: n, kind: "record" });
+      }
       for (const id of ids) {
+        if (items.length >= limit) break;
         const key = String(id);
         if (!key.toLowerCase().startsWith(partial)) continue;
-        items.push({ text: /\s/.test(key) ? `"${key}"` : key, label: key, kind: "record" });
-        if (items.length >= limit) break;
+        items.push({ text: quote(key), label: key, kind: "record" });
       }
     } else {
       const digits = partial.replace(/^#/, "");

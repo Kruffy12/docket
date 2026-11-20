@@ -357,26 +357,84 @@ class Parser {
     return this.change(recipe, ids, j);
   }
 
-  /** One text key (e.g. an SKU): a single word, or "quoted" when it has spaces. */
+  /**
+   * Text keys (e.g. an SKU) or names, comma-separated for several records:
+   *   item SMA12PSPC …   item a12 screen …   item "A12 screen", iphone 11 battery …
+   * An unquoted name runs until a field/action word, a +N/-N change, or "delete";
+   * quote a name that contains one of those words. Which record a name means is
+   * worked out against the data later (the parser never sees records).
+   */
   private textRecord(recipe: CompiledRecipe, i: number): ParseResult {
     const recordNext: Expect = { kind: "record", recipe: recipe.noun };
     const key = recipe.fieldMap.get(recipe.idColumn)?.label ?? "key";
-    if (i >= this.raw.length) return this.incomplete(`Which ${recipe.noun}? Type its ${key}`, recordNext);
-    const t = this.raw[i];
-    if (t.unterminated) {
-      this.push(t, "pending");
-      return this.incomplete("Close the quote to finish", recordNext);
+    const title = recipe.titleField ? recipe.fieldMap.get(recipe.titleField)?.label.toLowerCase() : undefined;
+    const what = title ? `${title} or ${key}` : key;
+    if (i >= this.raw.length) return this.incomplete(`Which ${recipe.noun}? Type its ${what}`, recordNext);
+
+    const lexWords = new Set(recipe.lexicon.map((e) => e.word));
+    const hasDelta = recipe.fields.some((f) => f.delta && isEditable(f));
+    const stops = (t: RawToken) => {
+      if (t.quoted) return false;
+      const w = t.text.toLowerCase();
+      return lexWords.has(w) || w === "delete" || (hasDelta && DELTA.test(t.text));
+    };
+
+    const keys: string[] = [];
+    let words: string[] = [];
+    const close = () => {
+      if (words.length) keys.push(words.join(" "));
+      words = [];
+    };
+    let trailingComma = false;
+    let j = i;
+    for (; j < this.raw.length; j++) {
+      const t = this.raw[j];
+      if (t.unterminated) {
+        this.push(t, "pending");
+        return this.incomplete("Close the quote to finish", recordNext);
+      }
+      if (stops(t)) break;
+      if (t.quoted) {
+        close();
+        const k = t.text.trim();
+        if (k === "") return this.error(j, `Type the ${recipe.noun}'s ${what}`);
+        keys.push(k);
+        this.push(t, "record", { display: k });
+        trailingComma = false;
+        continue;
+      }
+      // A comma (anywhere in the token) ends the current name.
+      let offset = 0;
+      const parts = t.text.split(",");
+      for (const [k, part] of parts.entries()) {
+        const start = t.start + offset;
+        offset += part.length + 1;
+        if (part !== "") {
+          words.push(part);
+          this.tokens.push({ role: "record", text: part, start, end: start + part.length, display: part });
+        }
+        if (k < parts.length - 1) close();
+      }
+      trailingComma = t.text.endsWith(",");
     }
-    const id = t.text.trim();
-    if (id === "") return this.error(i, `Type the ${recipe.noun}'s ${key}`);
-    this.push(t, "record", { display: id });
-    if (i + 1 >= this.raw.length) {
+    close();
+
+    if (keys.length === 0) {
+      if (j < this.raw.length) return this.error(j, `Type the ${recipe.noun}'s ${what} first`);
+      return this.incomplete(`Which ${recipe.noun}? Type its ${what}`, recordNext);
+    }
+    const ids: string[] = [];
+    for (const k of keys) if (!ids.some((x) => x.toLowerCase() === k.toLowerCase())) ids.push(k);
+
+    if (j >= this.raw.length) {
+      if (trailingComma) return this.incomplete(`Add another ${recipe.noun}`, recordNext);
       return this.ok(
-        { kind: "view", recipe: recipe.noun, ids: [id] },
-        this.typing(i) ? recordNext : { kind: "change", recipe: recipe.noun },
+        { kind: "view", recipe: recipe.noun, ids },
+        this.typing(j - 1) ? recordNext : { kind: "change", recipe: recipe.noun },
       );
     }
-    return this.change(recipe, [id], i + 1);
+    if (trailingComma) return this.error(j, `Add another ${recipe.noun} after the comma`);
+    return this.change(recipe, ids, j);
   }
 
   /** After the records: a field name, an action, or a bare value of some field. */
@@ -389,7 +447,6 @@ class Parser {
       const n = Number(t.text);
       this.push(t, "value", { display: `${deltaField.label} ${t.text}`, field: deltaField.name });
       if (n === 0) return this.error(i, "Change it by at least 1");
-      if (ids.length > 1) return this.error(i, `Change ${deltaField.label.toLowerCase()} one ${recipe.noun} at a time`);
       return this.deltaExtras(recipe, ids, deltaField, String(n), "add", i + 1);
     }
     if (recipe.rules.allowDelete && t.text.toLowerCase() === "delete") {
@@ -483,7 +540,6 @@ class Parser {
       if (n < 0) return this.error(i, `${field.label} can't be negative`);
       this.push(t, "value", { display: String(n), field: field.name });
       if (field.delta) {
-        if (ids.length > 1) return this.error(i, `Set ${field.label.toLowerCase()} one ${recipe.noun} at a time`);
         return this.deltaExtras(recipe, ids, field, String(n), "set", i + 1);
       }
       if (i + 1 < this.raw.length) return this.error(i + 1, "Nothing goes after the new value");
@@ -621,7 +677,7 @@ class Parser {
       field: field.name,
       value,
       op,
-      confirm: "enter",
+      confirm: confirmFor(ids.length, this.bulkLimit),
       ...(link !== undefined ? { link } : {}),
       ...(reason ? { reason } : {}),
     });

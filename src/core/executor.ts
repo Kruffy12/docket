@@ -190,10 +190,48 @@ export class Executor {
     }
   }
 
-  /** The stored ID for what was typed (text IDs match in any case). */
+  /** The stored ID for what was typed, when exactly one record matches. */
   private resolveId(id: RecordId): RecordId {
     if (this.recipe.idType !== "text") return id;
-    return this.keys.get(String(id).toLowerCase()) ?? id;
+    const m = this.match(id);
+    return m.length === 1 ? m[0] : id;
+  }
+
+  /**
+   * Every record a typed ID or name could mean, best first. Text IDs: the key
+   * itself (any case) wins; then a record whose title is exactly that; then
+   * records whose title contains every typed word (e.g. "a12 scr" → "A12 screen").
+   */
+  match(typed: RecordId, records: Map<RecordId, RecordData> = this.records): RecordId[] {
+    if (this.recipe.idType !== "text") return records.has(typed) ? [typed] : [];
+    const want = String(typed).trim().toLowerCase();
+    const key = this.keys.get(want);
+    if (key !== undefined && records.has(key)) return [key];
+    const tf = this.recipe.titleField;
+    if (!tf || want === "") return [];
+    const words = want.split(/\s+/);
+    const exact: RecordId[] = [];
+    const partial: RecordId[] = [];
+    for (const [id, r] of records) {
+      const name = String(r[tf] ?? "").toLowerCase();
+      if (!name) continue;
+      if (name.replace(/\s+/g, " ").trim() === words.join(" ")) exact.push(id);
+      else if (words.every((w) => name.includes(w))) partial.push(id);
+    }
+    return exact.length ? exact : partial;
+  }
+
+  /** The stored key for exactly what was typed (no name matching), e.g. to check a new SKU is free. */
+  keyFor(typed: RecordId): RecordId | undefined {
+    if (this.recipe.idType !== "text") return this.records.has(typed) ? typed : undefined;
+    return this.keys.get(String(typed).trim().toLowerCase());
+  }
+
+  /** "A12 screen (SMA12PSPC)": how a matched record is named in a message. */
+  private describe(id: RecordId): string {
+    const tf = this.recipe.titleField;
+    const name = tf ? this.records.get(id)?.[tf] : undefined;
+    return name ? `${name} (${this.label(id)})` : this.label(id);
   }
 
   private label(id: RecordId) {
@@ -250,7 +288,7 @@ export class Executor {
     return this.records.get(this.resolveId(id));
   }
 
-  /** The stored ID for a typed one, when it exists (e.g. "sma12pspc" → "SMA12PSPC"). */
+  /** The stored ID for a typed ID or name, when exactly one record matches (e.g. "a12 screen" → "SMA12PSPC"). */
   idFor(id: RecordId): RecordId | undefined {
     const r = this.resolveId(id);
     return this.records.has(r) ? r : undefined;
@@ -304,8 +342,23 @@ export class Executor {
       problems.push(`"${command.action}" isn't supported for this workspace`);
     }
 
+    const seen = new Set<RecordId>();
     for (const typed of command.ids) {
-      const id = this.resolveId(typed);
+      let id: RecordId = typed;
+      if (this.recipe.idType === "text") {
+        const m = this.match(typed, records);
+        if (m.length > 1) {
+          const shown = m.slice(0, 3).map((x) => this.describe(x)).join(", ");
+          problems.push(
+            `"${typed}" matches ${m.length} ${this.recipe.plural}: ${shown}${m.length > 3 ? ", …" : ""}. Add more of the name, or use the ${this.recipe.fieldMap.get(this.recipe.idColumn)?.label ?? "key"}`,
+          );
+          continue;
+        }
+        if (m.length === 1) id = m[0];
+      }
+      // Two names for the same record (or the same SKU twice) only change it once.
+      if (seen.has(id)) continue;
+      seen.add(id);
       const record = records.get(id);
       if (!record) {
         missing.push({ id: typed, suggestions: this.suggestIds(typed) });
@@ -533,7 +586,7 @@ export class Executor {
     } else {
       id = String(command.values[this.recipe.idColumn] ?? "").trim();
       if (!id) throw new PortalError("NOT_ALLOWED", `A new ${this.recipe.noun} needs its ${this.recipe.idColumn}`);
-      const taken = this.idFor(id);
+      const taken = this.keyFor(id);
       if (taken !== undefined) throw new PortalError("NOT_ALLOWED", `${this.recipe.label} ${this.label(taken)} already exists`);
     }
     await this.call(this.adapter.createAction, null, this.adapter.createData(id, command.values));

@@ -6,6 +6,7 @@
   "table": "inventory",
   "idColumn": "sku",
   "idType": "text",
+  "titleField": "name",
   "defaultField": "qty",
   "fields": [
     { "name": "sku", "label": "SKU", "type": "text", "editable": false },
@@ -26,7 +27,7 @@
     { "name": "supplier", "label": "Supplier", "type": "text" },
     { "name": "location", "label": "Location", "type": "text", "aliases": ["loc", "shelf"] },
     { "name": "compat", "label": "Fits", "type": "text", "aliases": ["fits"] },
-    { "name": "notes", "label": "Notes", "type": "text", "mode": "append", "aliases": ["note"] }
+    { "name": "notes", "label": "Notes", "type": "text", "mode": "append" }
   ],
   "actions": [],
   "preview": ["name", "qty", "minQty", "salePrice", "location"],
