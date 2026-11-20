@@ -70,6 +70,19 @@ export function planChanges(
     if (command.op === "append") {
       after = isEmpty(before) ? command.value : `${before!.replace(/\s+$/, "")}\n${command.value}`;
     }
+    if (command.op === "add") {
+      const have = Number(before ?? 0) || 0;
+      const total = have + Number(command.value);
+      if (total < 0) {
+        return {
+          changes: [],
+          notices,
+          blocked: `${field.label} is ${have}, so ${command.value} would go below 0 (set it with: ${field.name} <number>)`,
+          noop: false,
+        };
+      }
+      after = String(total);
+    }
     pending.set(field.name, { after, source: "command" });
     if (before !== after) {
       for (const e of field.effects ?? []) if (e.onValues?.includes(command.value)) applyEffect(e);

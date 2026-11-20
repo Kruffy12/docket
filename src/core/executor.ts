@@ -11,7 +11,8 @@
 //   - Undo first checks the record still holds what Docket wrote.
 
 import type { Command } from "./parser";
-import { valueLabel, type CompiledRecipe } from "./recipes";
+import { recordLabel, valueLabel, type CompiledRecipe, type RecordId } from "./recipes";
+import { decodeParts, toApiData, withChanges } from "./checklist";
 import { planChanges, type ChangePlan, type FieldChange, type RecordData } from "./rules";
 import { editDistance } from "./fuzzy";
 
@@ -36,26 +37,45 @@ export class PortalError extends Error {
   }
 }
 
+/** A stock-style change sent through the adapter's `adjust` action. */
+export interface Adjustment {
+  type: "add" | "remove" | "set";
+  qty: number;
+  link?: RecordId;
+  reason?: string;
+}
+
 export interface Adapter {
   listAction: string;
   listKey: string;
   createAction: string;
-  lastIdAction: string;
-  deleteAction: string;
+  /** Asked for the last ID before creating. Without it, the new record's ID is its idColumn value. */
+  lastIdAction?: string;
+  deleteAction?: string;
+  /** Defaults to "update". */
+  updateAction?: string;
+  /** Send the record ID inside `data` under this key instead of as `id` (e.g. "sku"). */
+  idParam?: string;
   /** Fields the update action accepts. */
   updatable: string[];
   /** Recipe action name → API action. */
   actions: Record<string, string>;
-  createData: (id: number, values: Record<string, string>) => Record<string, unknown>;
+  createData: (id: RecordId, values: Record<string, string>) => Record<string, unknown>;
   searchFields: string[];
   /** Field holding who claimed the record (for undoing claim/unclaim). */
-  claimField: string;
+  claimField?: string;
+  /** A field changed only through its own action (add/remove/set), e.g. stock quantity. */
+  adjust?: {
+    field: string;
+    action: string;
+    data: (a: Adjustment) => Record<string, unknown>;
+  };
 }
 
 type Plannable = Extract<Command, { kind: "update" } | { kind: "action" }>;
 
 export interface RecordPlan {
-  id: number;
+  id: RecordId;
   record: RecordData;
   plan: ChangePlan;
   /** true, or why this change can't be undone. */
@@ -65,7 +85,7 @@ export interface RecordPlan {
 export interface Preview {
   command: Plannable;
   items: RecordPlan[];
-  missing: { id: number; suggestions: number[] }[];
+  missing: { id: RecordId; suggestions: RecordId[] }[];
   /** Plain-language reasons nothing may be written. */
   problems: string[];
   /** Something to write and nothing in the way. */
@@ -78,7 +98,7 @@ export interface HistoryEntry {
   seq: number;
   at: Date;
   recipe: string;
-  id: number;
+  id: RecordId;
   /** e.g. "Status → Resolved" or "Claim". */
   summary: string;
   kind: "update" | "action" | "create" | "undo";
@@ -91,7 +111,7 @@ export interface HistoryEntry {
 export type ApplyResult =
   | { status: "done"; entries: HistoryEntry[]; notices: string[] }
   | { status: "stale"; preview: Preview; message: string }
-  | { status: "partial"; entries: HistoryEntry[]; failedId: number; error: PortalError; notStarted: number[] };
+  | { status: "partial"; entries: HistoryEntry[]; failedId: RecordId; error: PortalError; notStarted: RecordId[] };
 
 export type UndoResult =
   | { status: "done"; message: string; entry: HistoryEntry }
@@ -104,12 +124,16 @@ const same = (a: string | null | undefined, b: string | null | undefined) =>
 export interface ExecutorOptions {
   /** Signed-in username, for $me and claim rules. */
   me: () => string;
+  /** Signed-in portal role, for fields limited to some roles. */
+  role?: () => string;
   now?: () => Date;
 }
 
 export class Executor {
-  private readonly records = new Map<number, RecordData>();
-  private readonly search = new Map<number, string>();
+  private readonly records = new Map<RecordId, RecordData>();
+  private readonly search = new Map<RecordId, string>();
+  /** Text IDs typed in any case → the stored ID. */
+  private readonly keys = new Map<string, RecordId>();
   private seq = 0;
   readonly history: HistoryEntry[] = [];
   loadedAt: Date | null = null;
@@ -133,6 +157,49 @@ export class Executor {
     }
   }
 
+  /** Call an action on one record, passing its ID the way the adapter wants. */
+  private callFor(action: string, id: RecordId, data: Record<string, unknown> = {}) {
+    if (this.adapter.idParam) return this.call(action, null, { ...data, [this.adapter.idParam]: id });
+    return this.call(action, id as number, data);
+  }
+
+  /** Write planned field changes: the adjust field through its action, the rest in one update. */
+  private async write(
+    id: RecordId,
+    record: RecordData,
+    changes: Pick<FieldChange, "field" | "before" | "after">[],
+    adjustment?: Omit<Adjustment, "type" | "qty"> & { op?: "set" | "add" },
+  ) {
+    const adjust = this.adapter.adjust;
+    const counted = adjust ? changes.find((c) => c.field === adjust.field) : undefined;
+    const rest = changes.filter((c) => c !== counted);
+    if (rest.length) {
+      await this.callFor(this.adapter.updateAction ?? "update", id, toApiData(this.recipe, record, rest));
+    }
+    if (adjust && counted) {
+      const before = Number(counted.before ?? 0) || 0;
+      const after = Number(counted.after ?? 0) || 0;
+      const diff = after - before;
+      const a: Adjustment =
+        adjustment?.op === "set"
+          ? { type: "set", qty: after }
+          : { type: diff >= 0 ? "add" : "remove", qty: Math.abs(diff) };
+      if (adjustment?.link !== undefined) a.link = adjustment.link;
+      if (adjustment?.reason) a.reason = adjustment.reason;
+      await this.callFor(adjust.action, id, adjust.data(a));
+    }
+  }
+
+  /** The stored ID for what was typed (text IDs match in any case). */
+  private resolveId(id: RecordId): RecordId {
+    if (this.recipe.idType !== "text") return id;
+    return this.keys.get(String(id).toLowerCase()) ?? id;
+  }
+
+  private label(id: RecordId) {
+    return recordLabel(this.recipe, id);
+  }
+
   // ---- cache ---------------------------------------------------------------
 
   /** Normalise one API record to the recipe's fields (dates → yyyy-mm-dd, empties → null). */
@@ -144,19 +211,28 @@ export class Executor {
       else if (f.type === "date") out[f.name] = String(v).slice(0, 10);
       else out[f.name] = String(v);
     }
-    return out;
+    return decodeParts(this.recipe, out);
   }
 
   /** Fetch the full list (also how the bar refreshes each time it opens). */
   async refresh(): Promise<void> {
     const res = await this.call(this.adapter.listAction);
     const rows = res?.[this.adapter.listKey];
-    if (!Array.isArray(rows)) throw new PortalError("BAD_RESPONSE", "Servicell sent no job list");
+    if (!Array.isArray(rows)) throw new PortalError("BAD_RESPONSE", `Servicell sent no ${this.recipe.noun} list`);
     this.records.clear();
     this.search.clear();
+    this.keys.clear();
     for (const raw of rows) {
-      const id = Number(raw?.[this.recipe.idColumn]);
-      if (!Number.isInteger(id)) continue;
+      let id: RecordId;
+      if (this.recipe.idType === "text") {
+        const key = raw?.[this.recipe.idColumn];
+        if (key === null || key === undefined || String(key) === "") continue;
+        id = String(key);
+        this.keys.set(id.toLowerCase(), id);
+      } else {
+        id = Number(raw?.[this.recipe.idColumn]);
+        if (!Number.isInteger(id)) continue;
+      }
       this.records.set(id, this.normalize(raw));
       this.search.set(
         id,
@@ -170,22 +246,33 @@ export class Executor {
     return this.records.size;
   }
 
-  get(id: number): RecordData | undefined {
-    return this.records.get(id);
+  get(id: RecordId): RecordData | undefined {
+    return this.records.get(this.resolveId(id));
   }
 
-  /** Recent-looking IDs, newest first, for Tab completion. */
-  ids(): number[] {
-    return [...this.records.keys()].sort((a, b) => b - a);
+  /** The stored ID for a typed one, when it exists (e.g. "sma12pspc" → "SMA12PSPC"). */
+  idFor(id: RecordId): RecordId | undefined {
+    const r = this.resolveId(id);
+    return this.records.has(r) ? r : undefined;
+  }
+
+  /** Recent-looking IDs, newest first, for Tab completion. Text IDs keep list order. */
+  ids(): RecordId[] {
+    const all = [...this.records.keys()];
+    return this.recipe.idType === "text" ? all : (all as number[]).sort((a, b) => b - a);
   }
 
   /** IDs one typo away (e.g. #1248 → #1284), closest first. */
-  suggestIds(id: number, limit = 3): number[] {
-    const s = String(id);
+  suggestIds(id: RecordId, limit = 3): RecordId[] {
+    const s = String(id).toLowerCase();
     return [...this.records.keys()]
-      .map((k) => ({ k, d: editDistance(s, String(k)) }))
+      .map((k) => ({ k, d: editDistance(s, String(k).toLowerCase()) }))
       .filter((x) => x.d === 1)
-      .sort((a, b) => Math.abs(a.k - id) - Math.abs(b.k - id))
+      .sort((a, b) =>
+        typeof a.k === "number" && typeof b.k === "number" && typeof id === "number"
+          ? Math.abs(a.k - id) - Math.abs(b.k - id)
+          : 0,
+      )
       .slice(0, limit)
       .map((x) => x.k);
   }
@@ -194,7 +281,7 @@ export class Executor {
 
   private undoability(command: Plannable, record: RecordData): true | string {
     if (command.kind === "update") return true;
-    const claimedBy = record[this.adapter.claimField];
+    const claimedBy = this.adapter.claimField ? record[this.adapter.claimField] : null;
     switch (command.action) {
       case "claim":
         return isEmpty(claimedBy) ? true : `Can't be undone: ${claimedBy}'s claim can't be restored`;
@@ -207,7 +294,7 @@ export class Executor {
     }
   }
 
-  private planFor(command: Plannable, records: Map<number, RecordData>, now: Date): Preview {
+  private planFor(command: Plannable, records: Map<RecordId, RecordData>, now: Date): Preview {
     const items: RecordPlan[] = [];
     const missing: Preview["missing"] = [];
     const problems: string[] = [];
@@ -217,24 +304,36 @@ export class Executor {
       problems.push(`"${command.action}" isn't supported for this workspace`);
     }
 
-    for (const id of command.ids) {
+    for (const typed of command.ids) {
+      const id = this.resolveId(typed);
       const record = records.get(id);
       if (!record) {
-        missing.push({ id, suggestions: this.suggestIds(id) });
+        missing.push({ id: typed, suggestions: this.suggestIds(typed) });
         continue;
       }
       const plan = planChanges(this.recipe, command, record, ctx);
-      if (plan.blocked) problems.push(`#${id}: ${plan.blocked}`);
+      if (plan.blocked) problems.push(`${this.label(id)}: ${plan.blocked}`);
       if (command.kind === "update") {
-        const bad = plan.changes.filter((c) => !this.adapter.updatable.includes(c.field));
+        const writable = (field: string) => {
+          if (this.adapter.adjust?.field === field) return true;
+          const target = this.recipe.fieldMap.get(field)?.part?.of ?? field;
+          return this.adapter.updatable.includes(target);
+        };
+        const bad = plan.changes.filter((c) => !writable(c.field));
         for (const c of bad) problems.push(`${c.label} can't be changed through the portal API`);
+        const role = this.opts.role?.() ?? "";
+        for (const c of plan.changes) {
+          const roles = this.recipe.fieldMap.get(c.field)?.roles;
+          if (roles && !roles.includes(role)) problems.push(`Only ${roles.join(" or ")} accounts can change ${c.label.toLowerCase()}`);
+        }
       }
       items.push({ id, record, plan, undo: this.undoability(command, record) });
     }
 
     for (const m of missing) {
       const hint = m.suggestions.length ? ` Did you mean ${m.suggestions.map((s) => `#${s}`).join(" or ")}?` : "";
-      problems.push(`No ${this.recipe.noun} #${m.id} among active ${this.recipe.plural}.${hint}`);
+      const hint2 = m.suggestions.length ? ` Did you mean ${m.suggestions.map((s) => this.label(s)).join(" or ")}?` : "";
+      problems.push(`No ${this.recipe.noun} ${this.label(m.id)} among active ${this.recipe.plural}.${this.recipe.idType === "text" ? hint2 : hint}`);
     }
 
     const writable = problems.length === 0 && items.some((i) => !i.plan.noop);
@@ -259,6 +358,10 @@ export class Executor {
       return this.recipe.actions.find((a) => a.name === command.action)?.label ?? command.action;
     }
     const first = plan.changes[0];
+    if (first && command.op === "add") {
+      const n = Number(command.value);
+      return `${first.label} ${n > 0 ? "+" : ""}${n} → ${first.afterLabel}`;
+    }
     return first ? `${first.label} → ${first.afterLabel}` : "No change";
   }
 
@@ -287,10 +390,13 @@ export class Executor {
     for (const [n, item] of todo.entries()) {
       try {
         if (command.kind === "update") {
-          const data = Object.fromEntries(item.plan.changes.map((c) => [c.field, c.after]));
-          await this.call("update", item.id, data);
+          await this.write(item.id, item.record, item.plan.changes, {
+            op: command.op === "set" ? "set" : "add",
+            link: command.link,
+            reason: command.reason,
+          });
         } else {
-          await this.call(this.adapter.actions[command.action], item.id, {});
+          await this.callFor(this.adapter.actions[command.action], item.id, {});
         }
       } catch (e) {
         return {
@@ -302,9 +408,7 @@ export class Executor {
         };
       }
       // Reflect the write in the cache so the next preview is right.
-      const rec = { ...item.record };
-      for (const c of item.plan.changes) rec[c.field] = c.after;
-      this.records.set(item.id, rec);
+      this.records.set(item.id, withChanges(this.recipe, item.record, item.plan.changes));
 
       item.plan.notices.forEach((x) => notices.add(x));
       const entry: HistoryEntry = {
@@ -344,7 +448,7 @@ export class Executor {
 
     await this.refresh();
     const current = this.records.get(entry.id);
-    if (!current) return { status: "refused", message: `#${entry.id} is no longer among active ${this.recipe.plural}` };
+    if (!current) return { status: "refused", message: `${this.label(entry.id)} is no longer among active ${this.recipe.plural}` };
     const drifted = entry.changes.filter((c) => !same(current[c.field], c.after));
     if (drifted.length) {
       const c = drifted[0];
@@ -353,14 +457,17 @@ export class Executor {
       const label = isEmpty(now) ? "empty" : f.type === "enum" ? valueLabel(f, now!) : now;
       return {
         status: "refused",
-        message: `Not undone: #${entry.id} changed since (${c.label} is now ${label})`,
+        message: `Not undone: ${this.label(entry.id)} changed since (${c.label} is now ${label})`,
       };
     }
 
     const statusChange = entry.changes.find((c) => c.field === "status");
     const steps: [string, Record<string, unknown>][] = [];
     if (entry.kind === "update") {
-      steps.push(["update", Object.fromEntries(entry.changes.map((c) => [c.field, isEmpty(c.before) ? null : c.before]))]);
+      // Same path as the change itself: parts rebuild their holder from the current
+      // text, and a counted field goes back through its adjust action.
+      const back = entry.changes.map((c) => ({ field: c.field, before: c.after, after: isEmpty(c.before) ? null : c.before }));
+      await this.write(entry.id, current, back, { reason: `Undo: ${entry.summary}` });
     } else if (entry.action === "claim") {
       steps.push([this.adapter.actions.unclaim, {}]);
       if (statusChange) steps.push(["update", { status: statusChange.before }]);
@@ -373,7 +480,7 @@ export class Executor {
     }
 
     // In order, one at a time: the server runs batched calls concurrently.
-    for (const [action, data] of steps) await this.call(action, entry.id, data);
+    for (const [action, data] of steps) await this.callFor(action, entry.id, data);
 
     entry.undone = true;
     const reversed = entry.changes.map((c) => ({
@@ -383,9 +490,7 @@ export class Executor {
       beforeLabel: c.afterLabel,
       afterLabel: c.beforeLabel,
     }));
-    const record = { ...current };
-    for (const c of reversed) record[c.field] = c.after;
-    this.records.set(entry.id, record);
+    this.records.set(entry.id, withChanges(this.recipe, current, reversed));
 
     const undoEntry: HistoryEntry = {
       seq: ++this.seq,
@@ -405,21 +510,32 @@ export class Executor {
   // ---- create and find ---------------------------------------------------------
 
   /** Permanent: the portal hard-deletes, so there is no history entry and no undo. */
-  async delete(id: number): Promise<string> {
-    if (!this.recipe.rules.allowDelete) throw new PortalError("NOT_ALLOWED", `Deleting ${this.recipe.plural} isn't allowed`);
-    await this.call(this.adapter.deleteAction, id, {});
+  async delete(typed: RecordId): Promise<string> {
+    if (!this.recipe.rules.allowDelete || !this.adapter.deleteAction) {
+      throw new PortalError("NOT_ALLOWED", `Deleting ${this.recipe.plural} isn't allowed`);
+    }
+    const id = this.resolveId(typed);
+    await this.callFor(this.adapter.deleteAction, id, {});
     this.records.delete(id);
     this.search.delete(id);
-    return `Deleted ${this.recipe.label} #${id}`;
+    return `Deleted ${this.recipe.label} ${this.label(id)}`;
   }
 
   /** Create with the next free ID. Not undoable. */
   async create(command: Extract<Command, { kind: "create" }>): Promise<HistoryEntry> {
     if (!this.recipe.rules.allowCreate) throw new PortalError("NOT_ALLOWED", `Creating ${this.recipe.plural} isn't allowed`);
-    const res = await this.call(this.adapter.lastIdAction);
-    const lastId = Number(res?.lastId);
-    if (!Number.isInteger(lastId)) throw new PortalError("BAD_RESPONSE", "Servicell didn't say which ID is next");
-    const id = lastId + 1;
+    let id: RecordId;
+    if (this.adapter.lastIdAction) {
+      const res = await this.call(this.adapter.lastIdAction);
+      const lastId = Number(res?.lastId);
+      if (!Number.isInteger(lastId)) throw new PortalError("BAD_RESPONSE", "Servicell didn't say which ID is next");
+      id = lastId + 1;
+    } else {
+      id = String(command.values[this.recipe.idColumn] ?? "").trim();
+      if (!id) throw new PortalError("NOT_ALLOWED", `A new ${this.recipe.noun} needs its ${this.recipe.idColumn}`);
+      const taken = this.idFor(id);
+      if (taken !== undefined) throw new PortalError("NOT_ALLOWED", `${this.recipe.label} ${this.label(taken)} already exists`);
+    }
     await this.call(this.adapter.createAction, null, this.adapter.createData(id, command.values));
     await this.refresh().catch(() => undefined);
     const changes: FieldChange[] = Object.entries(command.values).map(([field, value]) => ({
@@ -436,7 +552,7 @@ export class Executor {
       at: this.now(),
       recipe: this.recipe.noun,
       id,
-      summary: `Created ${this.recipe.label} #${id}`,
+      summary: `Created ${this.recipe.label} ${this.label(id)}`,
       kind: "create",
       changes,
       undo: "Can't be undone from Docket (delete it instead)",
@@ -446,9 +562,9 @@ export class Executor {
   }
 
   /** Search the cached list: every text term must appear, every filter must match. */
-  find(command: Extract<Command, { kind: "find" }>, limit = 20): { id: number; record: RecordData }[] {
+  find(command: Extract<Command, { kind: "find" }>, limit = 20): { id: RecordId; record: RecordData }[] {
     const terms = command.text.map((t) => t.toLowerCase());
-    const out: { id: number; record: RecordData }[] = [];
+    const out: { id: RecordId; record: RecordData }[] = [];
     for (const id of this.ids()) {
       const record = this.records.get(id)!;
       if (!command.filters.every((f) => record[f.field] === f.value)) continue;

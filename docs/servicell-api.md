@@ -28,14 +28,30 @@ from Rust, which sends no Origin header.
 | `ping` | Public. `{ success, api: 2, maintenance }` |
 | `list` | All non-archived jobs (camelCase fields). No single-job fetch exists |
 | `lastid` | `{ lastId }`; next job ID is `lastId + 1` |
-| `update` | Only `status, notes, dateCompleted, priority, payment, estimatedCompletion`. Empty → null. Does **not** set `dateCompleted` itself. Any `status` in the update pushes to **staff** ("Device ready for pickup", "Abandoned device", or "Job status updated"), even if unchanged |
+| `update` | Only `status, notes, dateCompleted, priority, payment, estimatedCompletion`, plus `inspection` once the function's update map has it (see below). Empty → null. Does **not** set `dateCompleted` itself. Any `status` in the update pushes to **staff** ("Device ready for pickup", "Abandoned device", or "Job status updated"), even if unchanged |
 | `claimjob` | Sets `claimedBy` to you (not `technician`); `received` → `fixing`. Non-managers can't take a job someone else claimed |
 | `unclaim` | Clears `claimedBy`. Non-managers can only release their own |
 | `markcalled` | Ready jobs only. Sets `calledStatus: "called"`. No way to reverse |
 | `create` | `data: { repairId, customerName, device, jobType, … }`. Status starts `received` |
 | `delete` | **Hard delete**, no archive and no way back. Only the job's creator, its claimer or a manager; logged as `JOB_DELETE` in the audit log. Docket sends it for one job at a time, after the job number is typed to confirm |
 
-Not allowed from Docket: everything else.
+| `listinventory` | All items (`sku, name, category, qty, minQty, costPrice, salePrice, supplier, location, compat, notes`) |
+| `createitem` | `data: { sku, name, qty }`. Manager or cashier only. Fails on a SKU that exists |
+| `updateitem` | `data: { sku, …fields }`. Manager or cashier only. `costPrice` is ignored unless you're a manager |
+| `adjuststock` | `data: { sku, type: add\|remove\|set, qty, jobId, reason }`. Any role. Logs a stock movement; `remove` stops at 0. Sends the low / out-of-stock push to managers |
+
+Not allowed from Docket: everything else (including `deleteitem` and `upsertitem`).
+
+## Inspection checklist
+
+Stored in `jobs.inspection` as one string, written by the portal's New Job page:
+`SIM Tray: Present; SIM Card: Missing; Case: Not Brought; Charger: Not Brought; Other: …`
+(`SIM Tray`/`SIM Card`: Present or Missing; `Case`/`Charger`: Present or Not Brought;
+`Other` is free text and always last). An empty checklist is `No damage noted`.
+
+The function's `update` didn't accept `inspection` (version 7). Docket needs this line in
+`Jobs.update`'s field map: `inspection: 'inspection',`. Until it's deployed, the server
+ignores the field and the change silently doesn't save.
 
 ## Field formats
 

@@ -1,7 +1,7 @@
 import type { ReactNode, RefObject } from "react";
 import type { Token } from "../core/parser";
 import type { CompiledRecipe } from "../core/recipes";
-import { valueLabel } from "../core/recipes";
+import { recordLabel, valueLabel, type RecordId } from "../core/recipes";
 import type { FieldChange, RecordData } from "../core/rules";
 
 /**
@@ -72,7 +72,7 @@ export function Card({
   note,
 }: {
   recipe: CompiledRecipe;
-  id: number;
+  id: RecordId;
   record: RecordData;
   changes?: FieldChange[];
   compact?: boolean;
@@ -80,13 +80,16 @@ export function Card({
   note?: string;
 }) {
   const fields = recipe.preview.map((name) => recipe.fieldMap.get(name)!).filter((f) => record[f.name]);
-  const text = fields.filter((f) => f.type !== "enum").map((f) => record[f.name]);
+  // Numbers read as "Stock 4" so several of them don't run together.
+  const text = fields
+    .filter((f) => f.type !== "enum")
+    .map((f) => (f.type === "number" ? `${f.label} ${record[f.name]}` : record[f.name]));
   const enums = fields.filter((f) => f.type === "enum");
   return (
     <div className={`card${compact ? " is-compact" : ""}`}>
       <div className="card-head">
         <span className="card-id">
-          {recipe.label} #{id}
+          {recipe.label} {recordLabel(recipe, id)}
         </span>
         <span className="card-sub">{text.join(" · ")}</span>
         {!changes && (

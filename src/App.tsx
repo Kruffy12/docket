@@ -4,11 +4,11 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { Card, ChipLayer } from "./bar/parts";
 import { builtinRecipes } from "./core/builtin";
 import { complete } from "./core/complete";
-import { Executor, PortalError, type HistoryEntry, type Preview } from "./core/executor";
+import { Executor, PortalError, type Adapter, type HistoryEntry, type Preview } from "./core/executor";
 import { parse, type ParseResult } from "./core/parser";
-import { valueLabel } from "./core/recipes";
+import { recordLabel, valueLabel, type CompiledRecipe, type RecordId } from "./core/recipes";
 import type { RecordData } from "./core/rules";
-import { servicellAdapter } from "./core/servicell";
+import { inventoryAdapter, servicellAdapter } from "./core/servicell";
 import { portal, portalTransport, type Me } from "./portal";
 import "./App.css";
 
@@ -18,7 +18,10 @@ import "./App.css";
 //   3. a result (undone, stale, error…), kept until the user types again
 //   4. the live preview, derived from what's typed + the job cache (never stored)
 
-const recipe = builtinRecipes[0];
+// Jobs first (the default noun); each recipe gets its own cache and undo history.
+const ADAPTERS: Record<string, Adapter> = { job: servicellAdapter, item: inventoryAdapter };
+const RECIPES = builtinRecipes.filter((r) => ADAPTERS[r.noun]);
+const recipeOf = (noun: string): CompiledRecipe => RECIPES.find((r) => r.noun === noun) ?? RECIPES[0];
 const BAR_WIDTH = 640;
 const MAX_CARDS = 5;
 // An older change is undone through the `undo` preview, not straight from Ctrl+Z.
@@ -43,9 +46,9 @@ const store = {
   },
 };
 
-function describeRecord(id: number, r: RecordData): string {
+function describeRecord(recipe: CompiledRecipe, id: RecordId, r: RecordData): string {
   return [
-    `#${id}`,
+    recordLabel(recipe, id),
     ...recipe.preview.map((name) => {
       const f = recipe.fieldMap.get(name)!;
       const v = r[name];
@@ -71,6 +74,7 @@ function Lines({ lines, error }: { lines: string[]; error?: boolean }) {
 }
 
 function PreviewView({ p }: { p: Preview }) {
+  const recipe = recipeOf(p.command.recipe);
   const notices = [...new Set(p.items.flatMap((i) => (i.plan.noop ? [] : i.plan.notices)))];
   return (
     <>
@@ -96,14 +100,14 @@ interface Live {
   lines?: string[];
   error?: boolean;
   preview?: Preview;
-  cards?: { id: number; record: RecordData }[];
+  cards?: { recipe: CompiledRecipe; id: RecordId; record: RecordData }[];
   /** The input with a mistyped record number replaced by the likely one (Tab). */
   fix?: string;
   /** How to apply, e.g. "↵ apply". */
   hint?: string;
 }
 
-type Confirm = { kind: "delete"; id: number } | { kind: "bulk"; preview: Preview; count: number };
+type Confirm = { kind: "delete"; recipe: string; id: RecordId } | { kind: "bulk"; preview: Preview; count: number };
 
 interface Result {
   lines: string[];
@@ -135,15 +139,38 @@ export default function App() {
   const confirmRef = useRef<Confirm | null>(null);
   confirmRef.current = confirm;
 
-  const executor = useMemo(
-    () => new Executor(portalTransport, recipe, servicellAdapter, { me: () => meRef.current?.username ?? "" }),
+  const executors = useMemo(
+    () =>
+      new Map(
+        RECIPES.map((r) => [
+          r.noun,
+          new Executor(portalTransport, r, ADAPTERS[r.noun], {
+            me: () => meRef.current?.username ?? "",
+            role: () => meRef.current?.role ?? "",
+          }),
+        ]),
+      ),
     [],
   );
+  const exec = (noun: string) => executors.get(noun) ?? executors.get(RECIPES[0].noun)!;
+  // Jobs keep the original history key, so history from before inventory still loads.
+  const historyKeyFor = (noun: string, user: string) =>
+    noun === RECIPES[0].noun ? `docket.history.${user}` : `docket.history.${user}.${noun}`;
+  /** The newest change across every recipe that can still be undone. */
+  const lastUndoable = (): HistoryEntry | undefined =>
+    [...executors.values()]
+      .map((e) => e.lastUndoable())
+      .filter((e): e is HistoryEntry => !!e)
+      .sort((a, b) => b.at.getTime() - a.at.getTime())[0];
 
   const parsed: ParseResult = useMemo(() => parse(input, builtinRecipes), [input]);
 
   const focusInput = () => (meRef.current ? inputRef : userRef).current?.focus();
-  const historyKey = () => `docket.history.${meRef.current?.username ?? ""}`;
+  const saveHistory = () => {
+    const user = meRef.current?.username;
+    if (!user) return;
+    for (const [noun, e] of executors) store.set(historyKeyFor(noun, user), e.history.slice(-200));
+  };
 
   const show = (r: Result | null) => {
     setStamp(null);
@@ -160,13 +187,11 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     if (!meRef.current) return;
-    try {
-      await executor.refresh();
-      setCacheVersion((v) => v + 1);
-    } catch (e) {
-      handleError(e);
-    }
-  }, [executor, handleError]);
+    const results = await Promise.allSettled([...executors.values()].map((e) => e.refresh()));
+    setCacheVersion((v) => v + 1);
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed) handleError(failed.reason);
+  }, [executors, handleError]);
 
   // Session on start; reset and refresh the job list every time the bar opens.
   useEffect(() => {
@@ -183,16 +208,17 @@ export default function App() {
 
   // Per user: their saved undo history, then a fresh job list.
   useEffect(() => {
-    executor.history.length = 0;
-    if (me) {
-      executor.loadHistory(store.get(`docket.history.${me.username}`, []));
-      void refresh();
+    for (const [noun, e] of executors) {
+      e.history.length = 0;
+      if (me) e.loadHistory(store.get(historyKeyFor(noun, me.username), []));
     }
+    if (me) void refresh();
     setCacheVersion((v) => v + 1);
-  }, [me, executor, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me, executors, refresh]);
 
-  const fixFor = (id: number, to: number | undefined) => {
-    const t = parsed.tokens.find((t) => t.role === "record" && t.display === `#${id}`);
+  const fixFor = (recipe: CompiledRecipe, id: RecordId, to: RecordId | undefined) => {
+    const t = parsed.tokens.find((t) => t.role === "record" && t.display === recordLabel(recipe, id));
     return t && to !== undefined ? input.slice(0, t.start) + String(to) + input.slice(t.end) : undefined;
   };
 
@@ -201,19 +227,32 @@ export default function App() {
     const c = parsed.command;
     if (parsed.status === "empty") return {};
     if (parsed.status !== "ok" || !c) return { lines: [parsed.message ?? ""], error: parsed.status === "error" };
-    if (!executor.loadedAt && c.kind !== "undo" && c.kind !== "workspace") return { lines: ["Loading jobs…"] };
+    const recipe = recipeOf("recipe" in c ? c.recipe : RECIPES[0].noun);
+    const executor = exec(recipe.noun);
+    if (!executor.loadedAt && c.kind !== "undo" && c.kind !== "workspace") return { lines: [`Loading ${recipe.plural}…`] };
+    const label = (id: RecordId) => recordLabel(recipe, id);
     switch (c.kind) {
       case "view": {
         const cards = c.ids.flatMap((id) => {
-          const record = executor.get(id);
-          return record ? [{ id, record }] : [];
+          const key = executor.idFor(id);
+          const record = key === undefined ? undefined : executor.get(key);
+          return key !== undefined && record ? [{ recipe, id: key, record }] : [];
         });
         const lost = c.ids.filter((id) => !executor.get(id));
-        const lines = lost.map((id) => {
+        // Text that holds checklist parts (e.g. the inspection) isn't on the card; show it for one record.
+        const holders = [...new Set(recipe.fields.flatMap((f) => (f.part ? [f.part.of] : [])))];
+        const held =
+          cards.length === 1 ? holders.flatMap((h) => (cards[0].record[h] ? [`${recipe.fieldMap.get(h)!.label}: ${cards[0].record[h]}`] : [])) : [];
+        const lines = held.concat(lost.map((id) => {
           const s = executor.suggestIds(id)[0];
-          return `No job #${id} among active jobs.${s ? ` Did you mean #${s}? Tab` : ""}`;
-        });
-        return { cards, lines, error: lost.length > 0, fix: lost.length ? fixFor(lost[0], executor.suggestIds(lost[0])[0]) : undefined };
+          return `No ${recipe.noun} ${label(id)} among active ${recipe.plural}.${s !== undefined ? ` Did you mean ${label(s)}? Tab` : ""}`;
+        }));
+        return {
+          cards,
+          lines,
+          error: lost.length > 0,
+          fix: lost.length ? fixFor(recipe, lost[0], executor.suggestIds(lost[0])[0]) : undefined,
+        };
       }
       case "update":
       case "action": {
@@ -223,42 +262,71 @@ export default function App() {
           c.confirm === "typed"
             ? `↵ then type ${n} to confirm`
             : c.confirm === "shift-enter"
-              ? `Shift+↵ apply to ${n} jobs`
+              ? `Shift+↵ apply to ${n} ${recipe.plural}`
               : "↵ apply";
         const m = p.missing[0];
-        return { preview: p, hint: p.writable ? hint : undefined, fix: m && fixFor(m.id, m.suggestions[0]) };
+        const lines: string[] = [];
+        if (c.kind === "update" && c.link !== undefined) {
+          // The record a stock change names (e.g. the job a part went into), shown so a typo is caught.
+          const linkNoun = recipe.fieldMap.get(c.field)?.link;
+          const linked = linkNoun ? recipeOf(linkNoun) : undefined;
+          const rec = linked ? exec(linked.noun).get(c.link) : undefined;
+          if (linked) {
+            lines.push(
+              rec
+                ? `For ${describeRecord(linked, c.link, rec)}`
+                : `For ${linked.label} ${recordLabel(linked, c.link)} (not among active ${linked.plural})`,
+            );
+          }
+        }
+        if (c.kind === "update" && c.reason) lines.push(`Reason: ${c.reason}`);
+        return {
+          preview: p,
+          lines,
+          hint: p.writable ? hint : undefined,
+          fix: m && fixFor(recipe, m.id, m.suggestions[0]),
+        };
       }
       case "create": {
         const v = Object.entries(c.values)
           .map(([k, val]) => `${recipe.fieldMap.get(k)?.label}: ${val}`)
           .join(" · ");
-        return { lines: [`New job (next free ID) · ${v}`, "Can't be undone from Docket"], hint: "↵ create" };
+        if (recipe.idType === "text" && executor.idFor(c.values[recipe.idColumn] ?? "") !== undefined) {
+          return { lines: [`${recipe.label} ${c.values[recipe.idColumn]} already exists`], error: true };
+        }
+        const what = recipe.idType === "text" ? `New ${recipe.noun}` : `New ${recipe.noun} (next free ID)`;
+        return { lines: [`${what} · ${v}`, "Can't be undone from Docket"], hint: "↵ create" };
       }
       case "find": {
         const hits = executor.find(c, 6);
-        return { lines: hits.length ? hits.map((h) => describeRecord(h.id, h.record)) : ["No matching active jobs"] };
+        return {
+          lines: hits.length ? hits.map((h) => describeRecord(recipe, h.id, h.record)) : [`No matching active ${recipe.plural}`],
+        };
       }
       case "undo": {
-        const last = executor.lastUndoable();
+        const last = lastUndoable();
         return last
-          ? { lines: [`Undo #${last.id}: ${last.summary} (${ago(last.at)})`], hint: "↵ undo" }
+          ? {
+              lines: [`Undo ${recordLabel(recipeOf(last.recipe), last.id)}: ${last.summary} (${ago(last.at)})`],
+              hint: "↵ undo",
+            }
           : { lines: ["Nothing to undo"] };
       }
       case "workspace":
         return { lines: ["Only the Servicell workspace exists for now"] };
       case "delete": {
         const record = executor.get(c.id);
-        if (!record) return { lines: [`No job #${c.id} among active jobs`], error: true };
+        if (!record) return { lines: [`No ${recipe.noun} ${label(c.id)} among active ${recipe.plural}`], error: true };
         return {
-          cards: [{ id: c.id, record }],
-          lines: ["Deletes this job for good. Can't be undone."],
+          cards: [{ recipe, id: c.id, record }],
+          lines: [`Deletes this ${recipe.noun} for good. Can't be undone.`],
           error: true,
-          hint: "↵ then type the job number to confirm",
+          hint: `↵ then type the ${recipe.noun} number to confirm`,
         };
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parsed, executor, cacheVersion]);
+  }, [parsed, executors, cacheVersion]);
 
   // Grow or shrink the window to fit the content; keep chips under the scrolled text.
   useLayoutEffect(() => {
@@ -279,7 +347,7 @@ export default function App() {
       handleError(e);
     } finally {
       setBusy(false);
-      if (meRef.current) store.set(historyKey(), executor.history.slice(-200));
+      saveHistory();
       setCacheVersion((v) => v + 1);
       requestAnimationFrame(focusInput);
     }
@@ -293,19 +361,22 @@ export default function App() {
 
   const undoLast = () =>
     guarded(async () => {
-      const res = await executor.undo();
+      const last = lastUndoable();
+      const res = last ? await exec(last.recipe).undo(last) : await exec(RECIPES[0].noun).undo();
       show({ lines: [res.message], error: res.status === "refused" });
     });
 
   const applyPreview = (p: Preview) =>
     guarded(async () => {
-      const res = await executor.apply(p);
+      const recipe = recipeOf(p.command.recipe);
+      const res = await exec(recipe.noun).apply(p);
       if (res.status === "stale") {
         show({ lines: [res.message], error: true, preview: res.preview });
       } else if (res.status === "partial") {
-        const ok = res.entries.map((e) => `#${e.id}`).join(", ") || "none";
-        const rest = res.notStarted.map((i) => `#${i}`).join(", ") || "none";
-        show({ lines: [`Stopped at #${res.failedId}: ${res.error.message}`, `Saved: ${ok}. Not started: ${rest}`], error: true });
+        const l = (id: RecordId) => recordLabel(recipe, id);
+        const ok = res.entries.map((e) => l(e.id)).join(", ") || "none";
+        const rest = res.notStarted.map(l).join(", ") || "none";
+        show({ lines: [`Stopped at ${l(res.failedId)}: ${res.error.message}`, `Saved: ${ok}. Not started: ${rest}`], error: true });
       } else {
         setInput("");
         setResult(null);
@@ -325,18 +396,22 @@ export default function App() {
         show({ lines: [`Didn't match ${want}: nothing ${pending.kind === "delete" ? "deleted" : "changed"}`] });
         return;
       }
-      if (pending.kind === "delete") return guarded(async () => show({ lines: [await executor.delete(pending.id)] }));
+      if (pending.kind === "delete") {
+        return guarded(async () => show({ lines: [await exec(pending.recipe).delete(pending.id)] }));
+      }
       return applyPreview(pending.preview);
     }
 
     const c = parsed.command;
     if (parsed.status !== "ok" || !c) return;
+    const recipe = recipeOf("recipe" in c ? c.recipe : RECIPES[0].noun);
+    const executor = exec(recipe.noun);
 
     if (c.kind === "update" || c.kind === "action") {
       const p = live.preview;
       if (!p || !p.writable) return;
       if (c.confirm === "shift-enter" && !shift) {
-        show({ lines: [`${c.ids.length} jobs at once: press Shift+↵`], preview: p });
+        show({ lines: [`${c.ids.length} ${recipe.plural} at once: press Shift+↵`], preview: p });
         return;
       }
       remember(input.trim());
@@ -348,6 +423,7 @@ export default function App() {
       return applyPreview(p);
     }
     if (c.kind === "create") {
+      if (live.error) return;
       remember(input.trim());
       return guarded(async () => {
         const entry = await executor.create(c);
@@ -359,12 +435,13 @@ export default function App() {
       // Refresh first so the confirm step shows current data and a job that's already gone is caught.
       return guarded(async () => {
         await executor.refresh();
-        if (!executor.get(c.id)) {
-          show({ lines: [`No job #${c.id} among active jobs: nothing deleted`], error: true });
+        const id = executor.idFor(c.id);
+        if (id === undefined) {
+          show({ lines: [`No ${recipe.noun} ${recordLabel(recipe, c.id)} among active ${recipe.plural}: nothing deleted`], error: true });
           return;
         }
         setInput("");
-        setConfirm({ kind: "delete", id: c.id });
+        setConfirm({ kind: "delete", recipe: recipe.noun, id });
       });
     }
     if (c.kind === "undo") {
@@ -387,7 +464,12 @@ export default function App() {
         setInput(live.fix);
         return;
       }
-      const c = complete(input, builtinRecipes, { recentIds: executor.ids().slice(0, 50) });
+      const c = complete(input, builtinRecipes, {
+        recordIds: (noun) => {
+          const ids = exec(noun).ids();
+          return recipeOf(noun).idType === "text" ? ids : ids.slice(0, 50);
+        },
+      });
       const first = c.items[0];
       if (first) {
         setResult(null);
@@ -401,7 +483,7 @@ export default function App() {
       setInput(idx >= 0 ? recent[idx] : "");
     } else if (e.key === "z" && e.ctrlKey && input === "" && !confirm) {
       e.preventDefault();
-      const last = executor.lastUndoable();
+      const last = lastUndoable();
       if (last && Date.now() - last.at.getTime() > QUICK_UNDO_MS) setInput("undo");
       else void undoLast();
     } else if (e.key === "l" && e.ctrlKey) {
@@ -491,7 +573,8 @@ export default function App() {
   let body: React.ReactNode;
   let hint: string | undefined;
   if (confirm?.kind === "delete") {
-    const record = executor.get(confirm.id);
+    const recipe = recipeOf(confirm.recipe);
+    const record = exec(recipe.noun).get(confirm.id);
     body = (
       <>
         {record && <Card recipe={recipe} id={confirm.id} record={record} />}
@@ -502,7 +585,10 @@ export default function App() {
     body = (
       <>
         <PreviewView p={confirm.preview} />
-        <Lines lines={[`Type ${confirm.count} and press ↵ to change ${confirm.count} jobs. Esc cancels.`]} error />
+        <Lines
+          lines={[`Type ${confirm.count} and press ↵ to change ${confirm.count} ${recipeOf(confirm.preview.command.recipe).plural}. Esc cancels.`]}
+          error
+        />
       </>
     );
   } else if (stamp) {
@@ -510,10 +596,10 @@ export default function App() {
       <>
         {stamp.entries.slice(0, MAX_CARDS).map((e) => (
           <Card
-            key={e.seq}
-            recipe={recipe}
+            key={`${e.recipe}-${e.seq}`}
+            recipe={recipeOf(e.recipe)}
             id={e.id}
-            record={executor.get(e.id) ?? {}}
+            record={exec(e.recipe).get(e.id) ?? {}}
             changes={e.changes}
             compact={stamp.entries.length > 1}
             stamp
@@ -530,9 +616,9 @@ export default function App() {
       </>
     );
   } else if (parsed.status === "empty") {
-    const last = executor.lastUndoable();
+    const last = lastUndoable();
     const lines = [
-      ...(last ? [`Ctrl+Z undoes #${last.id} ${last.summary} · ${ago(last.at)}`] : []),
+      ...(last ? [`Ctrl+Z undoes ${recordLabel(recipeOf(last.recipe), last.id)} ${last.summary} · ${ago(last.at)}`] : []),
       ...recent.slice(0, 3).map((r) => `↑ ${r}`),
     ];
     body = lines.length ? <Lines lines={lines} /> : null;
@@ -541,7 +627,7 @@ export default function App() {
     body = (
       <>
         {live.cards?.map((c) => (
-          <Card key={c.id} recipe={recipe} id={c.id} record={c.record} compact={(live.cards?.length ?? 0) > 1} />
+          <Card key={c.id} recipe={c.recipe} id={c.id} record={c.record} compact={(live.cards?.length ?? 0) > 1} />
         ))}
         {live.preview && <PreviewView p={live.preview} />}
         {live.lines && <Lines lines={live.lines} error={live.error} />}

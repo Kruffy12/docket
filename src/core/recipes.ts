@@ -2,7 +2,10 @@
 // A recipe describes one noun (e.g. "job") over one table: which words mean
 // which field, value or action, and the rules that apply when they change.
 
-export type FieldType = "enum" | "text" | "date" | "user";
+export type FieldType = "enum" | "text" | "date" | "user" | "number";
+
+/** Record IDs: job numbers, or text keys such as an inventory SKU. */
+export type RecordId = number | string;
 
 export interface EnumValue {
   value: string;
@@ -44,6 +47,23 @@ export interface FieldDef {
   notices?: Notice[];
   /** Shown when someone tries to set a read-only field, e.g. how it does change. */
   hint?: string;
+  /**
+   * The value lives inside another text field as one "Key: Value" item of a
+   * "; "-separated list (e.g. an inspection checklist). Enum values are stored
+   * by their label. Part fields only take a value after their name: their
+   * values are never bare words, so several parts can share "present"/"missing".
+   */
+  part?: { of: string; key: string };
+  /** On the field that holds parts: the text that means "nothing recorded". */
+  placeholder?: string;
+  /** Number fields: whole numbers only. */
+  integer?: boolean;
+  /** Number fields: "+3" / "-1" right after the record changes this field by that much. */
+  delta?: boolean;
+  /** Delta fields: noun of a record a change can name, e.g. "job" in "-1 job 1284". */
+  link?: string;
+  /** Only these portal roles may change the field (the server ignores others). */
+  roles?: string[];
 }
 
 export interface ActionDef {
@@ -61,6 +81,8 @@ export interface Recipe {
   aliases: string[];
   table: string;
   idColumn: string;
+  /** "number" (default): IDs like 1284. "text": IDs like an SKU, typed as one word or "quoted". */
+  idType?: "number" | "text";
   defaultField: string;
   fields: FieldDef[];
   actions: ActionDef[];
@@ -142,6 +164,9 @@ export function loadRecipe(input: unknown): CompiledRecipe {
   for (const key of ["noun", "label", "plural", "table", "idColumn", "defaultField"] as const) {
     if (!isStr(r[key])) issues.push(`"${key}" must be a non-empty string`);
   }
+  if (r.idType !== undefined && r.idType !== "number" && r.idType !== "text") {
+    issues.push(`"idType" must be "number" or "text"`);
+  }
   if (!isStrArr(r.aliases)) issues.push(`"aliases" must be an array of strings`);
   if (!Array.isArray(r.fields) || r.fields.length === 0) issues.push(`"fields" must be a non-empty array`);
   if (r.actions !== undefined && !Array.isArray(r.actions)) issues.push(`"actions" must be an array`);
@@ -163,6 +188,7 @@ export function loadRecipe(input: unknown): CompiledRecipe {
     aliases: r.aliases!.map((a) => a.toLowerCase()),
     table: r.table!,
     idColumn: r.idColumn!,
+    idType: r.idType === "text" ? "text" : "number",
     defaultField: r.defaultField!,
     fields: r.fields as FieldDef[],
     actions: (r.actions ?? []) as ActionDef[],
@@ -178,7 +204,7 @@ export function loadRecipe(input: unknown): CompiledRecipe {
       issues.push(`fields[${i}] needs a name and label`);
       continue;
     }
-    if (!["enum", "text", "date", "user"].includes(f.type)) {
+    if (!["enum", "text", "date", "user", "number"].includes(f.type)) {
       issues.push(`field "${f.name}" has unknown type "${String(f.type)}"`);
     }
     if (fieldMap.has(f.name)) issues.push(`field "${f.name}" is defined twice`);
@@ -199,6 +225,20 @@ export function loadRecipe(input: unknown): CompiledRecipe {
     }
   }
   if (issues.length) throw new RecipeError(name, issues);
+
+  for (const f of recipe.fields) {
+    if (f.part) {
+      const holder = fieldMap.get(f.part.of);
+      if (!holder || holder.type !== "text") issues.push(`field "${f.name}" is part of "${f.part.of}", which must be a text field`);
+      else if (holder.mode === "append") issues.push(`field "${f.part.of}" holds parts, so it can't append`);
+      if (!isStr(f.part.key)) issues.push(`field "${f.name}" part needs a key`);
+      if (f.type !== "enum" && f.type !== "text") issues.push(`part field "${f.name}" must be enum or text`);
+      if (f.effects?.length || f.notices?.length) issues.push(`part field "${f.name}" can't have effects or notices`);
+    }
+    if ((f.integer || f.delta) && f.type !== "number") issues.push(`field "${f.name}": integer/delta need a number field`);
+    if (f.roles !== undefined && !isStrArr(f.roles)) issues.push(`field "${f.name}" roles must be strings`);
+  }
+  if (recipe.fields.filter((f) => f.delta).length > 1) issues.push(`only one field can take +/- changes`);
 
   const enumHas = (fieldName: string, value: string) =>
     fieldMap.get(fieldName)?.values?.some((v) => v.value === value) ?? false;
@@ -265,7 +305,8 @@ export function loadRecipe(input: unknown): CompiledRecipe {
     if (!isEditable(f)) continue;
     add(f.name, { kind: "field", field: f }, true);
     for (const a of f.aliases ?? []) add(a, { kind: "field", field: f }, false);
-    for (const v of f.values ?? []) {
+    // Part fields share value words ("present"), so their values only follow the field name.
+    for (const v of f.part ? [] : (f.values ?? [])) {
       add(v.value, { kind: "value", field: f, value: v }, true);
       for (const a of v.aliases ?? []) add(a, { kind: "value", field: f, value: v }, false);
     }
@@ -308,8 +349,18 @@ export function loadRecipes(inputs: unknown[]): CompiledRecipe[] {
       owner.set(w, r.noun);
     }
   }
+  for (const r of recipes) {
+    for (const f of r.fields) {
+      if (f.link && !recipes.some((x) => x.noun === f.link)) issues.push(`field "${r.noun}.${f.name}" links to unknown noun "${f.link}"`);
+    }
+  }
   if (issues.length) throw new RecipeError("(set)", issues);
   return recipes;
+}
+
+/** How a record is written in the bar: "#1284" for numbered records, the key itself otherwise. */
+export function recordLabel(recipe: Pick<Recipe, "idType">, id: RecordId): string {
+  return recipe.idType === "text" ? String(id) : `#${id}`;
 }
 
 export function valueLabel(field: FieldDef, value: string): string {

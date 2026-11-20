@@ -1,7 +1,7 @@
 // Tab completion: what can replace the word under the cursor (end of input).
 
 import { parse, type ParseOptions } from "./parser";
-import type { CompiledRecipe } from "./recipes";
+import { recordLabel, type CompiledRecipe, type RecordId } from "./recipes";
 import { tokenize } from "./tokenize";
 import { vocabularyFor, type WordKind } from "./vocab";
 
@@ -22,6 +22,8 @@ export interface Completion {
 export interface CompleteOptions extends ParseOptions {
   /** Most recent first; offered when a record number is expected. */
   recentIds?: number[];
+  /** Per recipe (e.g. job numbers vs item SKUs); takes over from recentIds when given. */
+  recordIds?: (recipe: string) => RecordId[];
   limit?: number;
 }
 
@@ -41,10 +43,21 @@ export function complete(input: string, recipes: CompiledRecipe[], opts: Complet
   const items: CompletionItem[] = [];
 
   if (next.kind === "record") {
-    const digits = partial.replace(/^#/, "");
-    for (const id of opts.recentIds ?? []) {
-      if (/^\d*$/.test(digits) && String(id).startsWith(digits)) {
-        items.push({ text: String(id), label: `#${id}`, kind: "record" });
+    const recipe = recipes.find((r) => r.noun === next.recipe);
+    const ids = opts.recordIds ? opts.recordIds(next.recipe) : (opts.recentIds ?? []);
+    if (recipe?.idType === "text") {
+      for (const id of ids) {
+        const key = String(id);
+        if (!key.toLowerCase().startsWith(partial)) continue;
+        items.push({ text: /\s/.test(key) ? `"${key}"` : key, label: key, kind: "record" });
+        if (items.length >= limit) break;
+      }
+    } else {
+      const digits = partial.replace(/^#/, "");
+      for (const id of ids) {
+        if (/^\d*$/.test(digits) && String(id).startsWith(digits)) {
+          items.push({ text: String(id), label: recipe ? recordLabel(recipe, id) : `#${id}`, kind: "record" });
+        }
       }
     }
   } else {
