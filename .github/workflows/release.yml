@@ -1,6 +1,8 @@
-# Builds the Windows installers and publishes them as a GitHub Release.
-# Runs when a version tag is pushed, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
-# The tag must match the version in src-tauri/tauri.conf.json, package.json and Cargo.toml.
+# Builds the Windows installers and publishes them as a GitHub Release named after
+# the version in src-tauri/tauri.conf.json (e.g. v0.2.0); the tag is created on the
+# commit that was built. Run it from Actions → Release → Run workflow (pick the
+# branch), or push a matching tag. Bump the version first: a release that already
+# exists gets its installers replaced.
 name: Release
 
 on:
@@ -36,8 +38,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Docket ${{ github.ref_name }}
+          tagName: v__VERSION__
+          releaseName: Docket v__VERSION__
           releaseBody: |
             Download **Docket_*_x64-setup.exe** (or the .msi) below and run it.
             Docket starts at login and lives in the tray; press Ctrl+Shift+Space to open the bar.
