@@ -34,6 +34,15 @@ npm run tauri dev
 The bar starts hidden. Press `Ctrl+Shift+Space` or left-click the tray icon. `Esc` hides it.
 Right-click the tray for Pause hotkey / Quit.
 
+## Download
+
+Installers are on the [Releases](https://github.com/Kruffy12/docket/releases) page: run
+`Docket_<version>_x64-setup.exe` (or the `.msi`).
+
+To publish a release, bump the version in `src-tauri/tauri.conf.json`, `package.json` and
+`src-tauri/Cargo.toml`, then push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`).
+GitHub Actions builds the Windows installers and attaches them to the release.
+
 ## Build an installer
 
 ```bash
