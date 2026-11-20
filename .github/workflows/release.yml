@@ -1,13 +1,15 @@
 # Builds the Windows installers and publishes them as a GitHub Release named after
 # the version in src-tauri/tauri.conf.json (e.g. v0.2.0); the tag is created on the
 # commit that was built. Run it from Actions → Release → Run workflow (pick the
-# branch), or push a matching tag. Bump the version first: a release that already
+# branch), push a matching tag, or publish a release for one. Bump the version first: a release that already
 # exists gets its installers replaced.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
