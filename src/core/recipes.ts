@@ -83,6 +83,8 @@ export interface Recipe {
   idColumn: string;
   /** "number" (default): IDs like 1284. "text": IDs like an SKU, typed as one word or "quoted". */
   idType?: "number" | "text";
+  /** Text IDs only: records can also be named by this field (e.g. an item's name). */
+  titleField?: string;
   defaultField: string;
   fields: FieldDef[];
   actions: ActionDef[];
@@ -189,6 +191,7 @@ export function loadRecipe(input: unknown): CompiledRecipe {
     table: r.table!,
     idColumn: r.idColumn!,
     idType: r.idType === "text" ? "text" : "number",
+    titleField: typeof r.titleField === "string" ? r.titleField : undefined,
     defaultField: r.defaultField!,
     fields: r.fields as FieldDef[],
     actions: (r.actions ?? []) as ActionDef[],
@@ -270,6 +273,11 @@ export function loadRecipe(input: unknown): CompiledRecipe {
         if (!enumHas(f.name, v)) issues.push(`field "${f.name}": notice trigger "${v}" is not one of its values`);
       }
     }
+  }
+
+  if (recipe.titleField !== undefined) {
+    if (recipe.idType !== "text") issues.push(`"titleField" needs idType "text"`);
+    if (!fieldMap.has(recipe.titleField)) issues.push(`titleField "${recipe.titleField}" is not a field`);
   }
 
   const def = fieldMap.get(recipe.defaultField);

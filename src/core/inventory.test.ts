@@ -247,3 +247,92 @@ describe("inventory commands", () => {
     expect(c.items.map((i) => i.text)).toEqual(["SMA12PSPC"]);
   });
 });
+
+describe("items by name, and several at once", () => {
+  const items = () => [
+    screen(),
+    { sku: "SMA13PSPC", name: "A13 screen", qty: 2, minQty: 1, salePrice: 85 },
+    { sku: "159", name: "iPhone 11 battery", qty: 4, minQty: 1, salePrice: 60 },
+    { sku: "N10S", name: "Note 10 screen", qty: 1, minQty: 1, salePrice: 150 },
+  ];
+  const ready = async () => {
+    const api = new FakeApi([], items());
+    const ex = stock(api);
+    await ex.refresh();
+    return { api, ex };
+  };
+
+  it("parses unquoted names up to the change, and comma lists", () => {
+    expect(p("item a12 screen -1 job 1284").command).toMatchObject({ ids: ["a12 screen"], op: "add", value: "-1", link: 1284 });
+    expect(p("item iphone 11 battery price 65").command).toMatchObject({ ids: ["iphone 11 battery"], field: "salePrice" });
+    expect(p("item note 10 screen -1").command).toMatchObject({ ids: ["note 10 screen"] });
+    expect(p('item a12 screen, "A13 screen",159 price 90').command).toMatchObject({
+      ids: ["a12 screen", "A13 screen", "159"],
+      field: "salePrice",
+      confirm: "shift-enter",
+    });
+    expect(p("item a12 screen, a13 screen +5").command).toMatchObject({ ids: ["a12 screen", "a13 screen"], op: "add", confirm: "shift-enter" });
+    expect(p("item a12 screen").command).toMatchObject({ kind: "view", ids: ["a12 screen"] });
+    expect(p("item a12 screen,").status).toBe("incomplete");
+    expect(p("item price 25").status).toBe("error");
+  });
+
+  it("finds an item by its exact name, then by words in it", async () => {
+    const { ex } = await ready();
+    expect(ex.match("a12 SCREEN")).toEqual(["SMA12PSPC"]);
+    expect(ex.match("11 batt")).toEqual(["159"]);
+    expect(ex.match("159")).toEqual(["159"]);
+    expect(ex.match("screen")).toHaveLength(3);
+    expect(ex.idFor("iphone battery")).toBe("159");
+  });
+
+  it("refuses a name that matches several items, and says which", async () => {
+    const { ex } = await ready();
+    const preview = ex.preview(p("item screen -1").command as any);
+    expect(preview.writable).toBe(false);
+    expect(preview.problems[0]).toMatch(/^"screen" matches 3 items: A12 screen \(SMA12PSPC\), A13 screen \(SMA13PSPC\), Note 10 screen \(N10S\)\./);
+  });
+
+  it("changes the price of several items, one update each", async () => {
+    const { api, ex } = await ready();
+    const preview = ex.preview(p("item a12 screen, a13 screen, 159 price 90").command as any);
+    expect(preview.writable).toBe(true);
+    const res = await ex.apply(preview);
+    expect(res.status).toBe("done");
+    expect(api.calls.map((c) => c.data)).toEqual([
+      { sku: "SMA12PSPC", salePrice: "90" },
+      { sku: "SMA13PSPC", salePrice: "90" },
+      { sku: "159", salePrice: "90" },
+    ]);
+  });
+
+  it("adjusts stock on several items with the same job and reason", async () => {
+    const { api, ex } = await ready();
+    const res = await ex.apply(ex.preview(p("item a12 screen, iphone 11 battery -1 job 1284 combo").command as any));
+    expect(res.status).toBe("done");
+    expect(api.calls.map((c) => c.data)).toEqual([
+      { sku: "SMA12PSPC", type: "remove", qty: 1, jobId: "1284", reason: "combo" },
+      { sku: "159", type: "remove", qty: 1, jobId: "1284", reason: "combo" },
+    ]);
+  });
+
+  it("changes an item once even if it's named twice", async () => {
+    const { api, ex } = await ready();
+    await ex.apply(ex.preview(p("item SMA12PSPC, a12 screen +1").command as any));
+    expect(api.calls).toHaveLength(1);
+  });
+
+  it("checks a new SKU against SKUs only, not names", async () => {
+    const { api, ex } = await ready();
+    await ex.create(p('new item SCREEN "Generic screen"').command as any);
+    expect(api.calls[0]).toMatchObject({ action: "createitem", data: { sku: "SCREEN" } });
+  });
+
+  it("completes names (quoted) before SKUs", () => {
+    const c = complete("item a1", builtinRecipes, {
+      recordIds: () => ["A1X"],
+      recordNames: () => ["A12 screen", "Battery"],
+    });
+    expect(c.items.map((i) => i.text)).toEqual(['"A12 screen"', "A1X"]);
+  });
+});

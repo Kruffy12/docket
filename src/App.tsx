@@ -233,20 +233,30 @@ export default function App() {
     const label = (id: RecordId) => recordLabel(recipe, id);
     switch (c.kind) {
       case "view": {
-        const cards = c.ids.flatMap((id) => {
-          const key = executor.idFor(id);
-          const record = key === undefined ? undefined : executor.get(key);
-          return key !== undefined && record ? [{ recipe, id: key, record }] : [];
-        });
-        const lost = c.ids.filter((id) => !executor.get(id));
+        // A name can match several items: show them (up to the card limit) so one can be picked.
+        const matched = c.ids.map((id) => ({ id, keys: executor.match(id) }));
+        const shown = new Set<RecordId>();
+        const cards = matched.flatMap(({ keys }) =>
+          keys.flatMap((key) => {
+            const record = executor.get(key);
+            if (!record || shown.has(key)) return [];
+            shown.add(key);
+            return [{ recipe, id: key, record }];
+          }),
+        ).slice(0, MAX_CARDS);
+        const lost = matched.filter((m) => m.keys.length === 0).map((m) => m.id);
+        const many = matched.filter((m) => m.keys.length > 1);
         // Text that holds checklist parts (e.g. the inspection) isn't on the card; show it for one record.
         const holders = [...new Set(recipe.fields.flatMap((f) => (f.part ? [f.part.of] : [])))];
         const held =
           cards.length === 1 ? holders.flatMap((h) => (cards[0].record[h] ? [`${recipe.fieldMap.get(h)!.label}: ${cards[0].record[h]}`] : [])) : [];
-        const lines = held.concat(lost.map((id) => {
-          const s = executor.suggestIds(id)[0];
-          return `No ${recipe.noun} ${label(id)} among active ${recipe.plural}.${s !== undefined ? ` Did you mean ${label(s)}? Tab` : ""}`;
-        }));
+        const lines = held.concat(
+          many.map((m) => `"${m.id}" matches ${m.keys.length} ${recipe.plural}. Add more of the name, or use the ${recipe.fieldMap.get(recipe.idColumn)?.label ?? "key"}`),
+          lost.map((id) => {
+            const s = executor.suggestIds(id)[0];
+            return `No ${recipe.noun} ${label(id)} among active ${recipe.plural}.${s !== undefined ? ` Did you mean ${label(s)}? Tab` : ""}`;
+          }),
+        );
         return {
           cards,
           lines,
@@ -291,7 +301,7 @@ export default function App() {
         const v = Object.entries(c.values)
           .map(([k, val]) => `${recipe.fieldMap.get(k)?.label}: ${val}`)
           .join(" · ");
-        if (recipe.idType === "text" && executor.idFor(c.values[recipe.idColumn] ?? "") !== undefined) {
+        if (recipe.idType === "text" && executor.keyFor(c.values[recipe.idColumn] ?? "") !== undefined) {
           return { lines: [`${recipe.label} ${c.values[recipe.idColumn]} already exists`], error: true };
         }
         const what = recipe.idType === "text" ? `New ${recipe.noun}` : `New ${recipe.noun} (next free ID)`;
@@ -468,6 +478,11 @@ export default function App() {
         recordIds: (noun) => {
           const ids = exec(noun).ids();
           return recipeOf(noun).idType === "text" ? ids : ids.slice(0, 50);
+        },
+        recordNames: (noun) => {
+          const tf = recipeOf(noun).titleField;
+          const e = exec(noun);
+          return tf ? e.ids().flatMap((id) => (e.get(id)?.[tf] ? [String(e.get(id)![tf])] : [])) : [];
         },
       });
       const first = c.items[0];
