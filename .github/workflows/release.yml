@@ -1,0 +1,75 @@
+# Builds the Windows installers and publishes them as a GitHub Release named after
+# the version in src-tauri/tauri.conf.json (e.g. v0.2.0); the tag is created on the
+# commit that was built.
+#
+# Runs when:
+#   - main gets a new version (bump it in tauri.conf.json, package.json and Cargo.toml,
+#     then merge or push). Pushes to main that keep an already-released version skip.
+#   - you push a v… tag, or click Actions → Release → Run workflow (always builds; an
+#     existing release for that version gets its installers replaced).
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the app version
+        id: v
+        shell: bash
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already released (pushes to main only)
+        id: check
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "branch" ] \
+             && gh release view "v${{ steps.v.outputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "v${{ steps.v.outputs.version }} is already released; bump the version to publish a new one."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: swatinem/rust-cache@v2
+        if: steps.check.outputs.skip != 'true'
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+        if: steps.check.outputs.skip != 'true'
+
+      - run: npm test
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: tauri-apps/tauri-action@v0
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Docket v__VERSION__
+          releaseBody: |
+            Download **Docket_*_x64-setup.exe** (or the .msi) below and run it.
+            Docket starts at login and lives in the tray; press Ctrl+Shift+Space to open the bar.
+          releaseDraft: false
+          prerelease: false

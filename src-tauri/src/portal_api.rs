@@ -26,6 +26,12 @@ const ALLOWED_ACTIONS: &[&str] = &[
     "markcalled",
     "create",
     "delete",
+    // Inventory: list, add an item, edit its details, change its stock count.
+    // Deleting items is left to the Staff Portal.
+    "listinventory",
+    "createitem",
+    "updateitem",
+    "adjuststock",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +252,13 @@ mod tests {
     #[test]
     fn login_only_through_its_own_command() {
         assert!(!ALLOWED_ACTIONS.contains(&"login"));
+    }
+
+    #[test]
+    fn inventory_cannot_delete_items() {
+        assert!(ALLOWED_ACTIONS.contains(&"adjuststock"));
+        assert!(!ALLOWED_ACTIONS.contains(&"deleteitem"));
+        assert!(!ALLOWED_ACTIONS.contains(&"upsertitem"));
     }
 
     /// Writes a throwaway credential, to confirm a real OS backend is used.

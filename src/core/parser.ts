@@ -1,6 +1,7 @@
 // Rule-based command parser. Grammar:
 //
 //   <noun> <record>[,<record>…] [field] <value>   update / action / view
+//   <noun> <record> +N|-N [job <n>] [reason…]     change a delta field (e.g. stock)
 //   new <noun> <arg>…                              create
 //   find [noun] <term>…                            search
 //   undo                                           revert last change
@@ -18,10 +19,12 @@ import { editDistance, matchWord, type Candidate } from "./fuzzy";
 import {
   isEditable,
   meaningKey,
+  recordLabel,
   type ActionDef,
   type CompiledRecipe,
   type FieldDef,
   type LexEntry,
+  type RecordId,
 } from "./recipes";
 import { tokenize, type RawToken } from "./tokenize";
 import { vocabularyFor, type Expect } from "./vocab";
@@ -63,20 +66,25 @@ export interface Token {
 export type Confirm = "enter" | "shift-enter" | "typed";
 
 export type Command =
-  | { kind: "view"; recipe: string; ids: number[] }
+  | { kind: "view"; recipe: string; ids: RecordId[] }
   | {
       kind: "update";
       recipe: string;
-      ids: number[];
+      ids: RecordId[];
       field: string;
+      /** For op "add", a signed whole number, e.g. "-1". */
       value: string;
-      op: "set" | "append";
+      op: "set" | "append" | "add";
       confirm: Confirm;
+      /** Delta-field changes: the linked record (e.g. the job a part was used on). */
+      link?: RecordId;
+      /** Delta-field changes: why, in the user's words. */
+      reason?: string;
     }
-  | { kind: "action"; recipe: string; ids: number[]; action: string; confirm: Confirm }
+  | { kind: "action"; recipe: string; ids: RecordId[]; action: string; confirm: Confirm }
   | { kind: "create"; recipe: string; values: Record<string, string>; confirm: Confirm }
   /** Permanent. One record only; the bar asks for its number to be typed before sending. */
-  | { kind: "delete"; recipe: string; id: number }
+  | { kind: "delete"; recipe: string; id: RecordId }
   | { kind: "find"; recipe: string; text: string[]; filters: { field: string; value: string }[] }
   | { kind: "undo" }
   | { kind: "workspace"; name: string };
@@ -103,6 +111,8 @@ export interface ParseOptions {
 const ID_PART = /^#?\d+$/;
 const ID_TOKEN = /^[#\d,]+$/;
 const GLUED = /^([a-z]+)(#?\d[\d,]*)$/i;
+const DELTA = /^[+-]\d+$/;
+const NUMBER = /^-?(\d+(\.\d*)?|\.\d+)$/;
 
 function confirmFor(count: number, bulkLimit: number): Confirm {
   if (count <= 1) return "enter";
@@ -285,6 +295,7 @@ class Parser {
 
   /** Parse one or more record IDs starting at raw index `i` (plus an optional glued remainder). */
   private records(recipe: CompiledRecipe, i: number, seed?: { text: string; start: number }): ParseResult {
+    if (recipe.idType === "text") return this.textRecord(recipe, i);
     const segments: { text: string; start: number; rawIndex: number }[] = [];
     if (seed) segments.push({ ...seed, rawIndex: 0 });
 
@@ -346,11 +357,41 @@ class Parser {
     return this.change(recipe, ids, j);
   }
 
+  /** One text key (e.g. an SKU): a single word, or "quoted" when it has spaces. */
+  private textRecord(recipe: CompiledRecipe, i: number): ParseResult {
+    const recordNext: Expect = { kind: "record", recipe: recipe.noun };
+    const key = recipe.fieldMap.get(recipe.idColumn)?.label ?? "key";
+    if (i >= this.raw.length) return this.incomplete(`Which ${recipe.noun}? Type its ${key}`, recordNext);
+    const t = this.raw[i];
+    if (t.unterminated) {
+      this.push(t, "pending");
+      return this.incomplete("Close the quote to finish", recordNext);
+    }
+    const id = t.text.trim();
+    if (id === "") return this.error(i, `Type the ${recipe.noun}'s ${key}`);
+    this.push(t, "record", { display: id });
+    if (i + 1 >= this.raw.length) {
+      return this.ok(
+        { kind: "view", recipe: recipe.noun, ids: [id] },
+        this.typing(i) ? recordNext : { kind: "change", recipe: recipe.noun },
+      );
+    }
+    return this.change(recipe, [id], i + 1);
+  }
+
   /** After the records: a field name, an action, or a bare value of some field. */
-  private change(recipe: CompiledRecipe, ids: number[], i: number): ParseResult {
+  private change(recipe: CompiledRecipe, ids: RecordId[], i: number): ParseResult {
     const t = this.raw[i];
     const next: Expect = { kind: "change", recipe: recipe.noun };
     if (t.quoted) return this.error(i, "Expected a field, value or action here, not quoted text");
+    const deltaField = recipe.fields.find((f) => f.delta && isEditable(f));
+    if (deltaField && DELTA.test(t.text)) {
+      const n = Number(t.text);
+      this.push(t, "value", { display: `${deltaField.label} ${t.text}`, field: deltaField.name });
+      if (n === 0) return this.error(i, "Change it by at least 1");
+      if (ids.length > 1) return this.error(i, `Change ${deltaField.label.toLowerCase()} one ${recipe.noun} at a time`);
+      return this.deltaExtras(recipe, ids, deltaField, String(n), "add", i + 1);
+    }
     if (recipe.rules.allowDelete && t.text.toLowerCase() === "delete") {
       this.push(t, "keyword", { display: "delete" });
       if (ids.length > 1) return this.error(i, `Delete one ${recipe.noun} at a time`);
@@ -400,7 +441,7 @@ class Parser {
     }
   }
 
-  private action(recipe: CompiledRecipe, ids: number[], action: ActionDef, i: number): ParseResult {
+  private action(recipe: CompiledRecipe, ids: RecordId[], action: ActionDef, i: number): ParseResult {
     if (i < this.raw.length) return this.error(i, `${action.label} takes nothing after it`);
     return this.ok({
       kind: "action",
@@ -411,7 +452,7 @@ class Parser {
     });
   }
 
-  private update(recipe: CompiledRecipe, ids: number[], field: FieldDef, value: string, op: "set" | "append") {
+  private update(recipe: CompiledRecipe, ids: RecordId[], field: FieldDef, value: string, op: "set" | "append") {
     return this.ok({
       kind: "update",
       recipe: recipe.noun,
@@ -424,8 +465,30 @@ class Parser {
   }
 
   /** The value after an explicit field name. */
-  private fieldValue(recipe: CompiledRecipe, ids: number[], field: FieldDef, i: number): ParseResult {
+  private fieldValue(recipe: CompiledRecipe, ids: RecordId[], field: FieldDef, i: number): ParseResult {
     const r = recipe.noun;
+    if (field.type === "number") {
+      const next: Expect = { kind: "text", recipe: r, field: field.name };
+      if (i >= this.raw.length) return this.incomplete(`New ${field.label.toLowerCase()}? Type a number`, next);
+      const t = this.raw[i];
+      const text = t.text.trim().replace(/^\$/, "");
+      if (t.quoted || !NUMBER.test(text) || (field.integer && !/^-?\d+$/.test(text))) {
+        if (this.typing(i) && /^[-$.]?$/.test(text)) {
+          this.push(t, "pending");
+          return this.incomplete(`New ${field.label.toLowerCase()}? Type a number`, next);
+        }
+        return this.error(i, `${field.label} needs ${field.integer ? "a whole number" : "a number"}`);
+      }
+      const n = Number(text);
+      if (n < 0) return this.error(i, `${field.label} can't be negative`);
+      this.push(t, "value", { display: String(n), field: field.name });
+      if (field.delta) {
+        if (ids.length > 1) return this.error(i, `Set ${field.label.toLowerCase()} one ${recipe.noun} at a time`);
+        return this.deltaExtras(recipe, ids, field, String(n), "set", i + 1);
+      }
+      if (i + 1 < this.raw.length) return this.error(i + 1, "Nothing goes after the new value");
+      return this.update(recipe, ids, field, String(n), "set");
+    }
     if (field.type === "enum") {
       const next: Expect = { kind: "value", recipe: r, field: field.name };
       if (i >= this.raw.length) {
@@ -501,6 +564,67 @@ class Parser {
 
     // "user" fields are never in the lexicon, so this is unreachable with a valid recipe.
     return this.error(i - 1, `${field.label} can't be set directly`);
+  }
+
+  /**
+   * After a delta-field change: an optional linked record ("job 1284") and an
+   * optional reason, in either order. Everything that isn't the link is the reason.
+   */
+  private deltaExtras(
+    recipe: CompiledRecipe,
+    ids: RecordId[],
+    field: FieldDef,
+    value: string,
+    op: "set" | "add",
+    i: number,
+  ): ParseResult {
+    const linked = field.link ? this.recipes.find((r) => r.noun === field.link) : undefined;
+    let link: RecordId | undefined;
+    const reasonParts: string[] = [];
+    for (let j = i; j < this.raw.length; j++) {
+      const t = this.raw[j];
+      if (t.unterminated) {
+        this.push(t, "text", { display: t.text });
+        return this.incomplete("Close the quote to finish", { kind: "none" });
+      }
+      const word = t.text.toLowerCase();
+      const glued = !t.quoted && linked ? GLUED.exec(t.text) : null;
+      if (linked && link === undefined && glued && linked.nounWords.includes(glued[1].toLowerCase()) && !glued[2].includes(",")) {
+        link = Number(glued[2].replace("#", ""));
+        this.push(t, "record", { display: `${linked.label} ${recordLabel(linked, link)}` });
+        continue;
+      }
+      if (linked && link === undefined && !t.quoted && linked.nounWords.includes(word)) {
+        const n = this.raw[j + 1];
+        if (!n) {
+          this.push(t, "noun", { display: linked.label });
+          return this.incomplete(`Which ${linked.noun}? Type its number`, { kind: "record", recipe: linked.noun });
+        }
+        if (!n.quoted && ID_PART.test(n.text)) {
+          link = Number(n.text.replace("#", ""));
+          this.push(t, "noun", { display: linked.label });
+          this.push(n, "record", { display: recordLabel(linked, link) });
+          j++;
+          continue;
+        }
+      }
+      if (t.text.trim() !== "") {
+        reasonParts.push(t.text.trim());
+        this.push(t, "text", { display: t.text });
+      }
+    }
+    const reason = reasonParts.join(" ");
+    return this.ok({
+      kind: "update",
+      recipe: recipe.noun,
+      ids,
+      field: field.name,
+      value,
+      op,
+      confirm: "enter",
+      ...(link !== undefined ? { link } : {}),
+      ...(reason ? { reason } : {}),
+    });
   }
 
   /** Everything from raw[i] to the end as one string; a lone quoted token gives its inner text. */

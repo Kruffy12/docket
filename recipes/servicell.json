@@ -260,6 +260,62 @@
         }
       ]
     }
+,
+    {
+      "name": "inspection",
+      "label": "Inspection",
+      "type": "text",
+      "aliases": ["insp"],
+      "placeholder": "No damage noted"
+    },
+    {
+      "name": "simTray",
+      "label": "SIM tray",
+      "type": "enum",
+      "aliases": ["tray"],
+      "part": { "of": "inspection", "key": "SIM Tray" },
+      "values": [
+        { "value": "present", "label": "Present", "aliases": ["yes"], "color": "green" },
+        { "value": "missing", "label": "Missing", "aliases": ["no"], "color": "red" }
+      ]
+    },
+    {
+      "name": "simCard",
+      "label": "SIM card",
+      "type": "enum",
+      "aliases": ["sim"],
+      "part": { "of": "inspection", "key": "SIM Card" },
+      "values": [
+        { "value": "present", "label": "Present", "aliases": ["yes"], "color": "green" },
+        { "value": "missing", "label": "Missing", "aliases": ["no"], "color": "red" }
+      ]
+    },
+    {
+      "name": "case",
+      "label": "Case",
+      "type": "enum",
+      "part": { "of": "inspection", "key": "Case" },
+      "values": [
+        { "value": "present", "label": "Present", "aliases": ["yes"], "color": "green" },
+        { "value": "not-brought", "label": "Not Brought", "aliases": ["missing", "no", "nb"], "color": "red" }
+      ]
+    },
+    {
+      "name": "charger",
+      "label": "Charger",
+      "type": "enum",
+      "part": { "of": "inspection", "key": "Charger" },
+      "values": [
+        { "value": "present", "label": "Present", "aliases": ["yes"], "color": "green" },
+        { "value": "not-brought", "label": "Not Brought", "aliases": ["missing", "no", "nb"], "color": "red" }
+      ]
+    },
+    {
+      "name": "other",
+      "label": "Inspection note",
+      "type": "text",
+      "part": { "of": "inspection", "key": "Other" }
+    }
   ],
   "actions": [
     {

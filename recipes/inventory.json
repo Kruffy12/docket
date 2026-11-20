@@ -1,0 +1,39 @@
+{
+  "noun": "item",
+  "label": "Item",
+  "plural": "items",
+  "aliases": ["part", "parts", "stock", "inv", "items"],
+  "table": "inventory",
+  "idColumn": "sku",
+  "idType": "text",
+  "defaultField": "qty",
+  "fields": [
+    { "name": "sku", "label": "SKU", "type": "text", "editable": false },
+    { "name": "name", "label": "Name", "type": "text" },
+    {
+      "name": "qty",
+      "label": "Stock",
+      "type": "number",
+      "integer": true,
+      "delta": true,
+      "link": "job",
+      "aliases": ["set", "count"]
+    },
+    { "name": "minQty", "label": "Min stock", "type": "number", "integer": true, "aliases": ["min"] },
+    { "name": "salePrice", "label": "Price", "type": "number", "aliases": ["price"] },
+    { "name": "costPrice", "label": "Cost", "type": "number", "aliases": ["cost"], "roles": ["manager"] },
+    { "name": "category", "label": "Category", "type": "text", "aliases": ["cat"] },
+    { "name": "supplier", "label": "Supplier", "type": "text" },
+    { "name": "location", "label": "Location", "type": "text", "aliases": ["loc", "shelf"] },
+    { "name": "compat", "label": "Fits", "type": "text", "aliases": ["fits"] },
+    { "name": "notes", "label": "Notes", "type": "text", "mode": "append", "aliases": ["note"] }
+  ],
+  "actions": [],
+  "preview": ["name", "qty", "minQty", "salePrice", "location"],
+  "create": { "args": ["sku", "name"] },
+  "rules": {
+    "confirm": "always",
+    "allowCreate": true,
+    "allowDelete": false
+  }
+}
