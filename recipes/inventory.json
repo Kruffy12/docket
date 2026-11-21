@@ -8,7 +8,7 @@
   "idType": "text",
   "defaultField": "qty",
   "fields": [
-    { "name": "sku", "label": "SKU", "type": "text", "editable": false },
+    { "name": "sku", "label": "SKU", "type": "text" },
     { "name": "name", "label": "Name", "type": "text" },
     {
       "name": "qty",

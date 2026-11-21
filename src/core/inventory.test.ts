@@ -40,7 +40,11 @@ class FakeApi implements Transport {
         return { items: this.items.map((i) => ({ ...i })) };
       case "updateitem": {
         const i = this.item(data.sku);
-        for (const [k, v] of Object.entries(data)) if (k !== "sku") i[k] = v;
+        for (const [k, v] of Object.entries(data)) if (k !== "sku" && k !== "newSku") i[k] = v;
+        if (data.newSku) {
+          if (this.items.some((x) => x !== i && x.sku === data.newSku)) throw new PortalError("API", "SKU exists");
+          i.sku = data.newSku;
+        }
         return { success: true };
       }
       case "adjuststock": {
@@ -233,6 +237,34 @@ describe("inventory commands", () => {
     expect(entry.id).toBe("NEW1");
     expect(api.calls[0]).toEqual({ action: "createitem", id: null, data: { sku: "NEW1", name: "Charging port", qty: 0 } });
     await expect(ex.create(p("new item sma12pspc Dupe").command as any)).rejects.toThrow(/already exists/);
+  });
+
+  it("parses a SKU change as a field edit", () => {
+    expect(p("item SMA12PSPC sku NEWSKU1").command).toMatchObject({ field: "sku", value: "NEWSKU1", op: "set" });
+  });
+
+  it("renames an item and undoes the rename", async () => {
+    const api = new FakeApi([], [screen()]);
+    const ex = stock(api);
+    await ex.refresh();
+    await ex.apply(ex.preview(p("item SMA12PSPC sku 780634201225").command as any));
+    expect(api.calls.at(-1)).toEqual({ action: "updateitem", id: null, data: { sku: "SMA12PSPC", newSku: "780634201225" } });
+    expect(api.items[0].sku).toBe("780634201225");
+    expect(api.items[0].name).toBe("A12 screen");
+
+    const undo = await ex.undo();
+    expect(undo.status).toBe("done");
+    expect(api.calls.at(-1)).toEqual({ action: "updateitem", id: null, data: { sku: "780634201225", newSku: "SMA12PSPC" } });
+    expect(api.items[0].sku).toBe("SMA12PSPC");
+  });
+
+  it("refuses a SKU rename onto an existing item", async () => {
+    const api = new FakeApi([], [screen(), { sku: "159", name: "iPhone 11 battery", qty: 2, minQty: 1 }]);
+    const ex = stock(api);
+    await ex.refresh();
+    const preview = ex.preview(p("item SMA12PSPC sku 159").command as any);
+    expect(preview.writable).toBe(false);
+    expect(preview.problems[0]).toMatch(/already exists/);
   });
 
   it("finds items by name or SKU", async () => {
