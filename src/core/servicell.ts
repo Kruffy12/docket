@@ -32,8 +32,10 @@ export const inventoryAdapter: Adapter = {
   createAction: "createitem",
   updateAction: "updateitem",
   idParam: "sku",
+  // Renaming sends the current SKU as `sku` and the new one here. Unverified against the live portal.
+  renameKey: "newSku",
   // Cost is manager-only on the server (other roles' edits are ignored); the recipe says so too.
-  updatable: ["name", "category", "minQty", "salePrice", "costPrice", "supplier", "location", "compat", "notes"],
+  updatable: ["sku", "name", "category", "minQty", "salePrice", "costPrice", "supplier", "location", "compat", "notes"],
   actions: {},
   createData: (id, values) => ({ sku: id, name: values.name, qty: 0 }),
   searchFields: ["sku", "name", "category", "compat", "location", "supplier"],

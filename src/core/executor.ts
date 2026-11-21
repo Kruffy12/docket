@@ -56,6 +56,8 @@ export interface Adapter {
   updateAction?: string;
   /** Send the record ID inside `data` under this key instead of as `id` (e.g. "sku"). */
   idParam?: string;
+  /** Data key that carries a new ID when renaming a text-ID record (with idParam holding the old one). */
+  renameKey?: string;
   /** Fields the update action accepts. */
   updatable: string[];
   /** Recipe action name → API action. */
@@ -172,9 +174,16 @@ export class Executor {
   ) {
     const adjust = this.adapter.adjust;
     const counted = adjust ? changes.find((c) => c.field === adjust.field) : undefined;
-    const rest = changes.filter((c) => c !== counted);
+    const renamed = this.recipe.idType === "text" ? changes.find((c) => c.field === this.recipe.idColumn) : undefined;
+    const rest = changes.filter((c) => c !== counted && c !== renamed);
+    // Later calls go to the new ID after a rename.
+    let target = id;
+    if (renamed) {
+      await this.callFor(this.adapter.updateAction ?? "update", id, { [this.adapter.renameKey!]: renamed.after });
+      target = String(renamed.after);
+    }
     if (rest.length) {
-      await this.callFor(this.adapter.updateAction ?? "update", id, toApiData(this.recipe, record, rest));
+      await this.callFor(this.adapter.updateAction ?? "update", target, toApiData(this.recipe, record, rest));
     }
     if (adjust && counted) {
       const before = Number(counted.before ?? 0) || 0;
@@ -186,7 +195,7 @@ export class Executor {
           : { type: diff >= 0 ? "add" : "remove", qty: Math.abs(diff) };
       if (adjustment?.link !== undefined) a.link = adjustment.link;
       if (adjustment?.reason) a.reason = adjustment.reason;
-      await this.callFor(adjust.action, id, adjust.data(a));
+      await this.callFor(adjust.action, target, adjust.data(a));
     }
   }
 
@@ -313,6 +322,12 @@ export class Executor {
       }
       const plan = planChanges(this.recipe, command, record, ctx);
       if (plan.blocked) problems.push(`${this.label(id)}: ${plan.blocked}`);
+      const rename = plan.changes.find((c) => c.field === this.recipe.idColumn);
+      if (rename && this.recipe.idType === "text") {
+        const taken = this.idFor(String(rename.after ?? ""));
+        if (!this.adapter.renameKey) problems.push(`${this.recipe.label} ${this.label(id)} can't be renamed through the portal API`);
+        else if (taken !== undefined && taken !== id) problems.push(`${this.recipe.label} ${this.label(taken)} already exists`);
+      }
       if (command.kind === "update") {
         const writable = (field: string) => {
           if (this.adapter.adjust?.field === field) return true;
@@ -447,8 +462,11 @@ export class Executor {
     if (entry.undo !== true) return { status: "refused", message: entry.undo };
 
     await this.refresh();
-    const current = this.records.get(entry.id);
-    if (!current) return { status: "refused", message: `${this.label(entry.id)} is no longer among active ${this.recipe.plural}` };
+    // A rename moved the record: it now lives under the new ID.
+    const renamed = this.recipe.idType === "text" ? entry.changes.find((c) => c.field === this.recipe.idColumn) : undefined;
+    const id = renamed ? String(renamed.after) : entry.id;
+    const current = this.records.get(id);
+    if (!current) return { status: "refused", message: `${this.label(id)} is no longer among active ${this.recipe.plural}` };
     const drifted = entry.changes.filter((c) => !same(current[c.field], c.after));
     if (drifted.length) {
       const c = drifted[0];
@@ -467,7 +485,7 @@ export class Executor {
       // Same path as the change itself: parts rebuild their holder from the current
       // text, and a counted field goes back through its adjust action.
       const back = entry.changes.map((c) => ({ field: c.field, before: c.after, after: isEmpty(c.before) ? null : c.before }));
-      await this.write(entry.id, current, back, { reason: `Undo: ${entry.summary}` });
+      await this.write(id, current, back, { reason: `Undo: ${entry.summary}` });
     } else if (entry.action === "claim") {
       steps.push([this.adapter.actions.unclaim, {}]);
       if (statusChange) steps.push(["update", { status: statusChange.before }]);
@@ -490,13 +508,15 @@ export class Executor {
       beforeLabel: c.afterLabel,
       afterLabel: c.beforeLabel,
     }));
-    this.records.set(entry.id, withChanges(this.recipe, current, reversed));
+    const restoredId = renamed ? String(renamed.before) : entry.id;
+    if (renamed) this.records.delete(id);
+    this.records.set(restoredId, withChanges(this.recipe, current, reversed));
 
     const undoEntry: HistoryEntry = {
       seq: ++this.seq,
       at: this.now(),
       recipe: entry.recipe,
-      id: entry.id,
+      id: restoredId,
       summary: `Undo: ${entry.summary}`,
       kind: "undo",
       changes: reversed,
