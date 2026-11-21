@@ -121,6 +121,8 @@ export default function App() {
   const [result, setResult] = useState<Result | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [stamp, setStamp] = useState<{ entries: HistoryEntry[]; notices: string[] } | null>(null);
+  // Hide the bar after a save. Toggle with "auto-close on" / "auto-close off"; stored on this PC.
+  const [autoClose, setAutoClose] = useState<boolean>(() => store.get("docket.autoClose", true));
   const [busy, setBusy] = useState(false);
   // Bumped whenever the job cache or history changes, so derived views recompute.
   const [cacheVersion, setCacheVersion] = useState(0);
@@ -381,8 +383,8 @@ export default function App() {
         setInput("");
         setResult(null);
         setStamp({ entries: res.entries, notices: res.notices });
-        // The stamp lands, then the bar gets out of the way. Ctrl+Z on reopening undoes it.
-        setTimeout(() => void getCurrentWindow().hide(), 600);
+        // The stamp lands, then the bar gets out of the way (unless auto-close is off). Ctrl+Z on reopening undoes it.
+        if (autoClose) setTimeout(() => void getCurrentWindow().hide(), 600);
       }
     });
 
@@ -400,6 +402,16 @@ export default function App() {
         return guarded(async () => show({ lines: [await exec(pending.recipe).delete(pending.id)] }));
       }
       return applyPreview(pending.preview);
+    }
+
+    const toggle = input.trim().match(/^auto-?close\s+(on|off)$/i);
+    if (toggle) {
+      const on = toggle[1].toLowerCase() === "on";
+      setAutoClose(on);
+      store.set("docket.autoClose", on);
+      setInput("");
+      show({ lines: [`Auto-close ${on ? "on: the bar hides after a save" : "off: the bar stays open after a save"}`] });
+      return;
     }
 
     const c = parsed.command;
