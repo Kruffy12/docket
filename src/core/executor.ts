@@ -181,6 +181,11 @@ export class Executor {
     if (renamed) {
       await this.callFor(this.adapter.updateAction ?? "update", id, { [this.adapter.renameKey!]: renamed.after });
       target = String(renamed.after);
+      // The portal can answer success without renaming, so check that the new SKU is really there.
+      await this.refresh();
+      if (!this.keys.has(target.toLowerCase())) {
+        throw new PortalError("NOT_SAVED", `The portal didn't rename ${String(id)} to ${target}`);
+      }
     }
     if (rest.length) {
       await this.callFor(this.adapter.updateAction ?? "update", target, toApiData(this.recipe, record, rest));

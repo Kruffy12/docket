@@ -258,6 +258,22 @@ describe("inventory commands", () => {
     expect(api.items[0].sku).toBe("SMA12PSPC");
   });
 
+  it("reports a rename the portal accepted but did not make", async () => {
+    // Mirrors the portal before the fix: updateitem ignores newSku and still answers success.
+    class IgnoresNewSku extends FakeApi {
+      async call(action: string, id: number | null = null, data: Record<string, any> = {}) {
+        const { newSku: _ignored, ...rest } = data;
+        return super.call(action, id, action === "updateitem" ? rest : data);
+      }
+    }
+    const api = new IgnoresNewSku([], [screen()]);
+    const ex = stock(api);
+    await ex.refresh();
+    const res = await ex.apply(ex.preview(p("item SMA12PSPC sku NEWSKU").command as any));
+    expect(res.status).toBe("partial");
+    expect(res.status === "partial" && res.error.message).toMatch(/didn't rename SMA12PSPC to NEWSKU/);
+  });
+
   it("refuses a SKU rename onto an existing item", async () => {
     const api = new FakeApi([], [screen(), { sku: "159", name: "iPhone 11 battery", qty: 2, minQty: 1 }]);
     const ex = stock(api);
